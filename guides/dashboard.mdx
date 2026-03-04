@@ -365,6 +365,65 @@ Resume scheduled runs:
 curl -X POST http://localhost:8080/api/v1/cronjobs/production/daily-report/resume
 ```
 
+### Delete Execution History
+
+Delete all execution history for a specific CronJob:
+
+**API Endpoint**: `DELETE /api/v1/cronjobs/{namespace}/{name}/history`
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/cronjobs/production/daily-report/history
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "deletedCount": 150,
+  "message": "Deleted 150 execution records"
+}
+```
+
+<Warning>
+This permanently deletes all execution records, logs, and events for the CronJob. Use with caution.
+</Warning>
+
+## Testing Suggested Fix Patterns
+
+Test custom suggested fix patterns before deploying them:
+
+**API Endpoint**: `POST /api/v1/patterns/test`
+
+```bash
+curl -X POST http://localhost:8080/api/v1/patterns/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pattern": {
+      "name": "custom-oom",
+      "match": {
+        "exitCode": 137
+      },
+      "suggestion": "Increase memory limit for {{\{ .CronJob.Name }\}}"
+    },
+    "testContext": {
+      "namespace": "production",
+      "cronjobName": "daily-report",
+      "exitCode": 137,
+      "reason": "OOMKilled"
+    }
+  }'
+```
+
+Response:
+
+```json
+{
+  "matched": true,
+  "suggestion": "Increase memory limit for daily-report"
+}
+```
+
 ## Health Check
 
 Check the health and status of the Guardian operator:
