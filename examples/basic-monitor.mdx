@@ -1,0 +1,286 @@
+---
+title: "Basic Monitor Examples"
+description: "Simple CronJobMonitor examples for common monitoring use cases"
+---
+
+## Overview
+
+The most common way to use CronJob Guardian is to create a `CronJobMonitor` that watches specific CronJobs based on labels or names. This page shows simple, practical examples to get you started.
+
+## Monitor CronJobs by Label
+
+The most flexible approach is to use label selectors. This allows you to add monitoring to any CronJob by simply adding a label.
+
+```yaml monitors/basic.yaml
+# Basic CronJobMonitor
+# Monitors CronJobs matching specific labels in the same namespace
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: critical-jobs
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 99
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### What This Does
+
+- Monitors all CronJobs in the `production` namespace with label `tier: critical`
+- Triggers an alert if no successful run in 25 hours (dead-man's switch)
+- Tracks success rate and alerts if it drops below 99% over 7 days
+- Sends alerts to the `slack-ops` AlertChannel
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Label your CronJobs">
+    Add the `tier: critical` label to CronJobs you want to monitor:
+
+    ```bash
+    kubectl label cronjob my-backup tier=critical -n production
+    ```
+
+    Or add it directly in your CronJob YAML:
+
+    ```yaml
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: my-backup
+      namespace: production
+      labels:
+        tier: critical  # This makes it monitored
+    ```
+  </Step>
+
+  <Step title="Create an AlertChannel">
+    Before creating the monitor, you need at least one AlertChannel. See the [Slack Alerts](/examples/slack-alerts) guide.
+  </Step>
+
+  <Step title="Apply the monitor">
+    ```bash
+    kubectl apply -f basic.yaml
+    ```
+  </Step>
+
+  <Step title="Verify it's working">
+    ```bash
+    kubectl get cronjobmonitor critical-jobs -n production
+    kubectl describe cronjobmonitor critical-jobs -n production
+    ```
+
+    The status should show which CronJobs are being monitored:
+
+    ```yaml
+    Status:
+      Monitored Jobs: 3
+      Conditions:
+        - Type: Ready
+          Status: True
+    ```
+  </Step>
+</Steps>
+
+## Monitor All CronJobs in a Namespace
+
+If you want to monitor every CronJob in a namespace without adding labels, use an empty selector.
+
+```yaml monitors/all-in-namespace.yaml
+# Monitor all CronJobs in the monitor's namespace
+# Empty selector matches all CronJobs
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: all-jobs
+  namespace: production
+spec:
+  # Empty selector = all CronJobs in this namespace
+  selector: {}
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### What This Does
+
+- Monitors **every** CronJob in the `production` namespace
+- No labels required on your CronJobs
+- Simpler configuration for smaller teams or less critical environments
+
+### When to Use This
+
+- Small namespaces with only critical jobs
+- Dev/staging environments where you want blanket monitoring
+- When you trust all jobs in the namespace to be monitored the same way
+
+<Warning>
+  This monitors ALL CronJobs in the namespace. If you have test jobs or jobs that are expected to fail, they will trigger alerts. Use label selectors for more control.
+</Warning>
+
+## Monitor Specific CronJobs by Name
+
+For precise control, specify exact CronJob names.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: financial-reports
+  namespace: finance
+spec:
+  selector:
+    matchNames:
+      - daily-revenue-report
+      - weekly-summary
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-finance
+```
+
+### What This Does
+
+- Monitors only the two named CronJobs: `daily-revenue-report` and `weekly-summary`
+- Other CronJobs in the namespace are ignored
+- Useful when you have a small set of critical jobs
+
+<Note>
+  `matchNames` only works when monitoring a single namespace. For multi-namespace monitoring, use label selectors instead.
+</Note>
+
+## Advanced Label Selectors
+
+For more complex filtering, use `matchExpressions` with operators like `In`, `NotIn`, `Exists`, and `DoesNotExist`.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: high-tier-jobs
+  namespace: production
+spec:
+  selector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [critical, high]
+      - key: monitoring
+        operator: NotIn
+        values: [disabled]
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### What This Does
+
+- Monitors CronJobs with `tier: critical` OR `tier: high`
+- Excludes CronJobs with `monitoring: disabled` label
+- Gives you fine-grained control over what gets monitored
+
+## Adjusting Dead-Man's Switch Timing
+
+The `maxTimeSinceLastSuccess` should be set based on your CronJob's schedule:
+
+<CodeGroup>
+```yaml Hourly Jobs
+deadManSwitch:
+  enabled: true
+  maxTimeSinceLastSuccess: 2h  # 1h schedule + 1h buffer
+```
+
+```yaml Daily Jobs
+deadManSwitch:
+  enabled: true
+  maxTimeSinceLastSuccess: 25h  # 24h schedule + 1h buffer
+```
+
+```yaml Weekly Jobs
+deadManSwitch:
+  enabled: true
+  maxTimeSinceLastSuccess: 169h  # 7 days + 1h buffer
+```
+
+```yaml Auto-Detect from Schedule
+deadManSwitch:
+  enabled: true
+  autoFromSchedule:
+    enabled: true
+    buffer: 1h  # Guardian calculates the interval automatically
+```
+</CodeGroup>
+
+<Tip>
+  Use `autoFromSchedule` when monitoring CronJobs with different schedules. Guardian will calculate the expected interval from each CronJob's cron expression.
+</Tip>
+
+## Tuning SLA Thresholds
+
+Adjust success rate requirements based on your job's criticality:
+
+<CodeGroup>
+```yaml Critical (99.9%)
+sla:
+  enabled: true
+  minSuccessRate: 99.9  # Must succeed nearly every time
+  windowDays: 7
+```
+
+```yaml High Priority (99%)
+sla:
+  enabled: true
+  minSuccessRate: 99  # 1 failure per 100 runs allowed
+  windowDays: 7
+```
+
+```yaml Standard (95%)
+sla:
+  enabled: true
+  minSuccessRate: 95  # 5 failures per 100 runs allowed
+  windowDays: 7
+```
+
+```yaml Lenient (90%)
+sla:
+  enabled: true
+  minSuccessRate: 90  # Tolerates occasional failures
+  windowDays: 30  # Longer window smooths out variance
+```
+</CodeGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Namespace Monitoring" icon="layer-group" href="/examples/namespace-monitor">
+    Monitor CronJobs across multiple namespaces
+  </Card>
+  <Card title="Advanced Features" icon="wand-magic-sparkles" href="/examples/advanced-monitor">
+    SLA tracking, regression detection, and maintenance windows
+  </Card>
+  <Card title="Slack Alerts" icon="slack" href="/examples/slack-alerts">
+    Set up Slack notifications for your monitors
+  </Card>
+  <Card title="Alert Channels" icon="bell" href="/concepts/alert-channels">
+    Learn about all alert channel types
+  </Card>
+</CardGroup>

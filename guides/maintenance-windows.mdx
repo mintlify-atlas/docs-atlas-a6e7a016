@@ -1,0 +1,437 @@
+---
+title: Maintenance Windows
+description: Suppress alerts and pause monitoring during planned maintenance periods
+---
+
+Maintenance windows allow you to suppress alerts during planned maintenance, deployments, or testing periods. This prevents alert fatigue and false alarms when you expect CronJobs to fail or miss schedules.
+
+## How Maintenance Windows Work
+
+Maintenance windows are defined using cron expressions and durations. During a window:
+
+- **Alerts are suppressed**: No notifications are sent to alert channels
+- **Monitoring continues**: Guardian still tracks executions and metrics
+- **Status is visible**: The dashboard shows when a window is active
+
+## Basic Maintenance Window
+
+Define a weekly maintenance window every Sunday at 2 AM for 4 hours:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: my-monitor
+  namespace: production
+spec:
+  maintenanceWindows:
+    - name: weekly-maintenance
+      schedule: "0 2 * * 0"  # Every Sunday at 2 AM
+      duration: 4h
+      timezone: America/New_York
+      suppressAlerts: true
+```
+
+<Note>
+  The `schedule` field uses standard cron syntax. Times are in the specified timezone (default: UTC).
+</Note>
+
+## Multiple Maintenance Windows
+
+You can define multiple windows for different maintenance scenarios:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-monitor
+  namespace: production
+spec:
+  maintenanceWindows:
+    # Weekly database maintenance
+    - name: database-maintenance
+      schedule: "0 2 * * 0"  # Sunday 2 AM
+      duration: 4h
+      timezone: UTC
+      suppressAlerts: true
+    
+    # Monthly platform updates
+    - name: platform-updates
+      schedule: "0 0 1 * *"  # First day of month, midnight
+      duration: 6h
+      timezone: UTC
+      suppressAlerts: true
+    
+    # Daily backup window
+    - name: backup-window
+      schedule: "0 3 * * *"  # Every day at 3 AM
+      duration: 1h
+      timezone: America/Los_Angeles
+      suppressAlerts: true
+```
+
+## Timezone Support
+
+Maintenance windows support timezone-aware scheduling:
+
+```yaml
+maintenanceWindows:
+  - name: us-east-maintenance
+    schedule: "0 2 * * 0"
+    duration: 4h
+    timezone: America/New_York  # Eastern Time
+  
+  - name: europe-maintenance
+    schedule: "0 2 * * 6"
+    duration: 4h
+    timezone: Europe/London  # British Time
+  
+  - name: asia-maintenance
+    schedule: "0 2 * * 5"
+    duration: 4h
+    timezone: Asia/Tokyo  # Japan Time
+```
+
+<Steps>
+  <Step title="Choose your timezone">
+    Use IANA timezone names (e.g., `America/New_York`, `Europe/London`, `Asia/Tokyo`).
+  </Step>
+  
+  <Step title="Define the schedule in local time">
+    The cron expression is interpreted in the specified timezone, not UTC.
+  </Step>
+  
+  <Step title="Verify the window times">
+    Check the CronJobMonitor status to see when the next window is scheduled.
+  </Step>
+</Steps>
+
+## Cron Schedule Examples
+
+| Description | Cron Expression |
+|-------------|----------------|
+| Every Sunday at 2 AM | `0 2 * * 0` |
+| Every day at midnight | `0 0 * * *` |
+| First day of month at 3 AM | `0 3 1 * *` |
+| Every weekday at 1 AM | `0 1 * * 1-5` |
+| Every Saturday at 4 AM | `0 4 * * 6` |
+| Twice a week (Wed, Sun) at 2 AM | `0 2 * * 0,3` |
+
+## Conditional Alert Suppression
+
+You can optionally disable alert suppression while keeping monitoring active:
+
+```yaml
+maintenanceWindows:
+  - name: observation-window
+    schedule: "0 2 * * 0"
+    duration: 4h
+    suppressAlerts: false  # Monitor but still send alerts
+```
+
+<Warning>
+  Setting `suppressAlerts: false` means alerts will still be sent during the window. This is useful for observation periods where you want to monitor but not perform destructive changes.
+</Warning>
+
+## Real-World Examples
+
+### Weekly Database Maintenance
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  
+  maintenanceWindows:
+    - name: weekly-db-maintenance
+      schedule: "0 2 * * 0"  # Sunday 2 AM
+      duration: 4h
+      timezone: America/New_York
+      suppressAlerts: true
+  
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+```
+
+### Deployment Windows
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: api-cronjobs
+  namespace: production
+spec:
+  maintenanceWindows:
+    # Weekly deployment window
+    - name: weekly-deploy
+      schedule: "0 20 * * 2"  # Tuesday 8 PM
+      duration: 2h
+      timezone: UTC
+      suppressAlerts: true
+    
+    # Emergency hotfix window
+    - name: emergency-window
+      schedule: "0 22 * * *"  # Daily at 10 PM
+      duration: 30m
+      timezone: UTC
+      suppressAlerts: true
+```
+
+### Multi-Region Maintenance
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: global-monitor
+  namespace: production
+spec:
+  selector:
+    allNamespaces: true
+  
+  maintenanceWindows:
+    # US region maintenance (Sunday 2 AM EST)
+    - name: us-maintenance
+      schedule: "0 2 * * 0"
+      duration: 4h
+      timezone: America/New_York
+      suppressAlerts: true
+    
+    # EU region maintenance (Saturday 2 AM GMT)
+    - name: eu-maintenance
+      schedule: "0 2 * * 6"
+      duration: 4h
+      timezone: Europe/London
+      suppressAlerts: true
+    
+    # APAC region maintenance (Friday 2 AM JST)
+    - name: apac-maintenance
+      schedule: "0 2 * * 5"
+      duration: 4h
+      timezone: Asia/Tokyo
+      suppressAlerts: true
+```
+
+## Checking Active Maintenance Windows
+
+### Via kubectl
+
+```bash
+kubectl describe cronjobmonitor my-monitor -n production
+```
+
+Look for the maintenance windows section in the status:
+
+```yaml
+Status:
+  Phase: Active
+  Maintenance Windows:
+    - Name: weekly-maintenance
+      Next Start: 2024-01-21T02:00:00Z
+      Duration: 4h
+      Active: false
+```
+
+### Via Dashboard
+
+The web dashboard shows:
+
+- **Active windows**: Highlighted in yellow when a window is in progress
+- **Next scheduled window**: Countdown timer to next window
+- **Window history**: Past windows and their duration
+
+### Via API
+
+```bash
+curl http://localhost:8080/api/v1/monitors/production/my-monitor
+```
+
+Response includes maintenance window configuration and status.
+
+## Impact on Monitoring
+
+### What Happens During a Window
+
+<CardGroup cols={2}>
+  <Card title="Alerts Suppressed" icon="bell-slash">
+    No notifications sent to alert channels (Slack, PagerDuty, email).
+  </Card>
+  
+  <Card title="Monitoring Active" icon="eye">
+    Guardian continues tracking job executions and updating metrics.
+  </Card>
+  
+  <Card title="Status Updated" icon="info-circle">
+    Dashboard and API show the window is active.
+  </Card>
+  
+  <Card title="History Retained" icon="database">
+    All executions are recorded for post-maintenance analysis.
+  </Card>
+</CardGroup>
+
+### What Happens After a Window
+
+- **Alert suppression ends**: Normal alerting resumes immediately
+- **Pending alerts sent**: If issues persist after the window, alerts are sent
+- **SLA calculations continue**: Success rates and durations include maintenance period executions
+
+## Interaction with Other Features
+
+### Dead-Man's Switch
+
+Maintenance windows pause dead-man's switch timers:
+
+```yaml
+deadManSwitch:
+  enabled: true
+  maxTimeSinceLastSuccess: 25h
+
+maintenanceWindows:
+  - name: weekly-maintenance
+    schedule: "0 2 * * 0"
+    duration: 4h
+    suppressAlerts: true
+```
+
+During the window, the dead-man's switch won't trigger even if jobs don't run.
+
+### SLA Tracking
+
+SLA calculations **include** maintenance window executions:
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 95
+  windowDays: 7
+
+maintenanceWindows:
+  - name: weekly-maintenance
+    schedule: "0 2 * * 0"
+    duration: 4h
+    suppressAlerts: true
+```
+
+Failed jobs during maintenance count toward the success rate but don't trigger alerts.
+
+<Note>
+  If you want to exclude maintenance windows from SLA calculations, consider using `suspendedHandling.pauseMonitoring` or temporarily suspending CronJobs during maintenance.
+</Note>
+
+### Suspended CronJobs
+
+Maintenance windows work alongside suspended CronJob handling:
+
+```yaml
+suspendedHandling:
+  pauseMonitoring: true  # Pause monitoring when CronJob is suspended
+  alertIfSuspendedFor: 168h  # Alert if suspended for 7 days
+
+maintenanceWindows:
+  - name: weekly-maintenance
+    schedule: "0 2 * * 0"
+    duration: 4h
+    suppressAlerts: true
+```
+
+If a CronJob is suspended during a maintenance window, monitoring is paused (if `pauseMonitoring: true`).
+
+## Troubleshooting
+
+### Window Not Activating
+
+<Steps>
+  <Step title="Verify the cron expression">
+    Test your cron expression using [crontab.guru](https://crontab.guru/) or similar tools.
+    
+    ```bash
+    # Validate the schedule
+    echo "0 2 * * 0" | crontab -
+    ```
+  </Step>
+  
+  <Step title="Check the timezone">
+    Ensure the timezone is correct. Guardian logs the next scheduled window at startup.
+    
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller | grep "maintenance window"
+    ```
+  </Step>
+  
+  <Step title="Verify monitor status">
+    Check if the monitor is in Active phase:
+    
+    ```bash
+    kubectl get cronjobmonitor my-monitor -o jsonpath='{.status.phase}'
+    ```
+  </Step>
+</Steps>
+
+### Alerts Still Sent During Window
+
+<Warning>
+  Ensure `suppressAlerts: true` is set. The default value is `true`, but if you explicitly set it to `false`, alerts will still be sent.
+</Warning>
+
+Check your configuration:
+
+```bash
+kubectl get cronjobmonitor my-monitor -o yaml | grep -A 5 maintenanceWindows
+```
+
+### Wrong Timezone
+
+If windows activate at the wrong time:
+
+1. Verify the timezone name is correct (use IANA format)
+2. Check Guardian's timezone configuration
+3. Confirm the cron expression is in local time, not UTC
+
+```bash
+# List available timezones
+timedatectl list-timezones | grep America
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Descriptive Names" icon="tag">
+    Name windows clearly: `weekly-db-maintenance`, not `window-1`.
+  </Card>
+  
+  <Card title="Coordinate Across Teams" icon="users">
+    Share maintenance schedules with all teams to avoid conflicts.
+  </Card>
+  
+  <Card title="Don't Overuse" icon="exclamation-triangle">
+    Too many windows reduce monitoring effectiveness. Only suppress during actual maintenance.
+  </Card>
+  
+  <Card title="Document Windows" icon="book">
+    Add comments explaining why each window exists and what maintenance occurs.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Dashboard" icon="chart-bar" href="/guides/dashboard">
+    View active maintenance windows in the UI
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

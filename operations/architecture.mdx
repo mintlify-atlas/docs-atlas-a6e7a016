@@ -1,0 +1,395 @@
+---
+title: System Architecture
+description: Understanding CronJob Guardian's architecture, components, and data flow
+---
+
+## Overview
+
+CronJob Guardian is a Kubernetes operator built with the Kubebuilder framework that provides comprehensive monitoring, SLA tracking, and alerting for Kubernetes CronJobs.
+
+## Core Components
+
+The operator consists of several key components that work together to provide reliable CronJob monitoring:
+
+### Manager
+
+The operator runs as a single binary using the controller-runtime manager pattern. The main components are initialized in `cmd/main.go:58-469`.
+
+**Key responsibilities:**
+- Bootstrap all controllers and schedulers
+- Manage leader election for HA deployments
+- Handle graceful shutdown
+- Serve metrics, health probes, and web UI
+
+### Controllers
+
+Three controllers watch and reconcile Kubernetes resources:
+
+#### CronJobMonitor Controller
+
+**Location:** `internal/controller/cronjobmonitor_controller.go`
+
+**Responsibilities:**
+- Watches `CronJobMonitor` custom resources
+- Tracks which CronJobs match each monitor's selector
+- Performs SLA calculations and dead-man's switch checks
+- Triggers alerts when SLA violations occur
+
+**Reconciliation triggers:**
+- CronJobMonitor CR changes
+- CronJob changes (creation, deletion, spec updates)
+- Execution history updates
+
+#### AlertChannel Controller
+
+**Location:** `internal/controller/alertchannel_controller.go`
+
+**Responsibilities:**
+- Watches `AlertChannel` custom resources
+- Registers/unregisters channels with the alert dispatcher
+- Validates channel configuration
+- Tests connectivity for configured channels
+
+#### Job Controller
+
+**Location:** `internal/controller/job_controller.go`
+
+**Responsibilities:**
+- Watches Job completions (Jobs created by CronJobs)
+- Records execution history to storage backend
+- Captures pod logs and events
+- Detects failures and triggers immediate alerts
+
+### Schedulers
+
+Background schedulers run periodic tasks. Only the leader replica executes schedulers when leader election is enabled.
+
+#### Dead-Man Scheduler
+
+**Location:** `internal/scheduler/deadman.go`
+
+**Default interval:** 1 minute (configurable)
+
+**Responsibilities:**
+- Periodically checks all monitored CronJobs
+- Detects jobs that haven't run within expected windows
+- Triggers dead-man's switch alerts
+- Respects maintenance windows and suspended states
+
+**Startup behavior:** Waits for `startup-grace-period` (default: 30s) before first run to allow controllers to reconcile.
+
+#### SLA Recalculation Scheduler
+
+**Location:** `internal/scheduler/sla_recalc.go`
+
+**Default interval:** 5 minutes (fixed)
+
+**Responsibilities:**
+- Recalculates SLA metrics for all monitored CronJobs
+- Detects SLA breaches (success rate, duration regression)
+- Triggers SLA violation alerts
+- Updates Prometheus metrics
+
+#### History Pruner
+
+**Location:** `internal/scheduler/pruner.go`
+
+**Default interval:** 1 hour (configurable)
+
+**Responsibilities:**
+- Removes old execution records based on retention policy
+- Prunes logs separately if log retention differs
+- Prevents unbounded database growth
+
+### Storage Layer
+
+**Location:** `internal/store/`
+
+**Implementation:** GORM-based abstraction supporting multiple backends
+
+**Supported databases:**
+- **SQLite** (default) - Uses pure Go driver (no CGO), WAL mode enabled
+- **PostgreSQL** - Full feature support including native percentile functions
+- **MySQL/MariaDB** - Full feature support
+
+**Data stored:**
+- Execution history (start time, duration, status, exit code)
+- Job logs and Kubernetes events (optional, configurable)
+- Alert history with resolution tracking
+- Channel statistics (success/failure counts)
+
+**Schema:** Auto-migrated on startup using GORM migrations. Three main tables:
+- `executions` - Job execution records
+- `alert_history` - Alert events and resolutions
+- `channel_stats` - Per-channel delivery statistics
+
+### Alert Dispatcher
+
+**Location:** `internal/alerting/dispatcher.go`
+
+**Responsibilities:**
+- Routes alerts to configured channels
+- Enforces rate limits and backpressure
+- Suppresses duplicate alerts
+- Tracks delivery statistics
+- Handles graceful shutdown
+
+**Rate limiting:**
+- Token bucket algorithm
+- Default: 50 alerts/minute, burst of 10
+- Per-channel delivery tracking
+- Automatic duplicate suppression (default: 1 hour)
+
+**Supported channels:**
+- Slack (webhook)
+- PagerDuty (Events API v2)
+- Webhook (generic HTTP)
+- Email (SMTP)
+
+### SLA Analyzer
+
+**Location:** `internal/analyzer/sla.go`
+
+**Responsibilities:**
+- Calculates success rates over rolling windows
+- Computes duration percentiles (P50, P95, P99)
+- Detects duration regressions using baseline comparison
+- Provides LRU cache for performance (1000 entries)
+
+**Metrics calculated:**
+- Success rate percentage (successful runs / total runs)
+- Duration statistics (avg, P50, P95, P99)
+- Regression detection (current P95 vs baseline P95)
+
+### Web UI & REST API
+
+**Location:** `internal/api/`
+
+**Default port:** 8080 (configurable)
+
+**Features:**
+- Embedded React SPA served from binary
+- RESTful API for querying execution history
+- Real-time metrics and status
+- Swagger/OpenAPI documentation at `/swagger/`
+- Export functionality (CSV, JSON)
+
+**Endpoints:**
+- `GET /api/v1/monitors` - List all monitors
+- `GET /api/v1/cronjobs/{namespace}/{name}/executions` - Execution history
+- `GET /api/v1/cronjobs/{namespace}/{name}/metrics` - SLA metrics
+- `GET /api/v1/alerts/history` - Alert history
+- `GET /healthz` - Health check
+- `GET /readyz` - Readiness check
+
+### Metrics Server
+
+**Default port:** 8443 (HTTPS, configurable)
+
+**Metrics exported:** See [Prometheus Metrics](/operations/prometheus-metrics)
+
+**Security:** Supports TLS with certificate rotation and authentication/authorization via SubjectAccessReview.
+
+## Data Flow
+
+### Job Execution Flow
+
+```
+1. CronJob creates a Job (Kubernetes)
+   ↓
+2. Job Controller watches Job completion
+   ↓
+3. Fetch pod logs and events from API server
+   ↓
+4. Record execution to storage backend
+   ↓
+5. Check for immediate failures
+   ↓
+6. Trigger failure alert if needed
+   ↓
+7. Update Prometheus metrics
+```
+
+### Dead-Man's Switch Flow
+
+```
+1. Dead-Man Scheduler wakes up (every 1m)
+   ↓
+2. Query all CronJobMonitor resources
+   ↓
+3. For each monitored CronJob:
+   ↓
+4. Get last successful execution from store
+   ↓
+5. Calculate expected interval (from schedule or config)
+   ↓
+6. Check if time since last success > threshold
+   ↓
+7. Skip if in maintenance window or suspended
+   ↓
+8. Trigger dead-man alert if threshold exceeded
+   ↓
+9. Alert Dispatcher routes to channels
+```
+
+### SLA Recalculation Flow
+
+```
+1. SLA Scheduler wakes up (every 5m)
+   ↓
+2. Query all CronJobMonitor resources with SLA enabled
+   ↓
+3. For each monitored CronJob:
+   ↓
+4. Query execution history from store (rolling window)
+   ↓
+5. Calculate metrics (success rate, percentiles)
+   ↓
+6. Compare against baseline (for regression detection)
+   ↓
+7. Check SLA thresholds
+   ↓
+8. Trigger SLA breach alerts if needed
+   ↓
+9. Update Prometheus metrics
+   ↓
+10. Update CronJobMonitor status
+```
+
+### Alert Flow
+
+```
+1. Alert triggered by controller or scheduler
+   ↓
+2. Alert Dispatcher receives alert request
+   ↓
+3. Check rate limits (token bucket)
+   ↓
+4. Check duplicate suppression cache
+   ↓
+5. Resolve channel references from monitor spec
+   ↓
+6. For each channel:
+   ↓
+7. Format alert message (channel-specific)
+   ↓
+8. Send to channel (async)
+   ↓
+9. Record in alert_history table
+   ↓
+10. Update channel statistics
+   ↓
+11. Increment Prometheus counters
+```
+
+## High Availability
+
+### Leader Election
+
+When enabled (`leader-election.enabled=true`), multiple replicas can run with one active leader.
+
+**Lease configuration:**
+- Lease duration: 15s (default)
+- Renew deadline: 10s (default)
+- Retry period: 2s (default)
+
+**Lease mechanism:** Uses Kubernetes `coordination.k8s.io/v1` Lease resources.
+
+**Leader-only operations:**
+- All schedulers (Dead-Man, SLA Recalc, History Pruner)
+- Background periodic tasks
+
+**All-replica operations:**
+- Controllers (CronJobMonitor, AlertChannel, Job)
+- Metrics endpoint
+- Web UI/API
+- Health probes
+
+**Failover:** When the leader dies, a new leader is elected within `lease-duration` (default 15s). No data loss occurs as all state is in Kubernetes and the storage backend.
+
+## Resource Requirements
+
+**Default limits:**
+```yaml
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+```
+
+**Scaling considerations:**
+- Memory usage grows with number of monitored CronJobs and execution history
+- SQLite requires persistent volume; PostgreSQL/MySQL recommended for HA
+- Single replica handles ~1000 CronJobs with default settings
+- Use leader election + multiple replicas for HA
+- Storage backend is the primary scaling bottleneck
+
+## Security Architecture
+
+### RBAC
+
+The operator requires specific Kubernetes permissions:
+
+**Cluster-scoped:**
+- Read CronJobs, Jobs, Pods, Secrets, Namespaces
+- Read pod logs
+- Full access to `guardian.illenium.net` API group
+
+**Namespace-scoped:**
+- Leader election (ConfigMaps, Leases in operator namespace)
+- Metrics authentication (TokenReviews, SubjectAccessReviews)
+
+See [Security](/operations/security) for complete RBAC details.
+
+### Secret Management
+
+**Channel secrets:**
+- Webhook URLs, SMTP passwords, API tokens stored in Secrets
+- Referenced by AlertChannel resources via `secretRef`
+- Operator reads secrets on-demand when sending alerts
+- Cross-namespace secret references allowed (configurable)
+
+**Database credentials:**
+- PostgreSQL/MySQL passwords via environment variables
+- Can use existing Secrets via Helm chart configuration
+- Never logged or exposed in metrics
+
+### Network Policies
+
+Example NetworkPolicy included at `config/network-policy/allow-metrics-traffic.yaml` to restrict metrics endpoint access to specific namespaces.
+
+## Deployment Modes
+
+### Single Namespace
+
+Monitor CronJobs in a single namespace. The operator is deployed in that namespace and only watches resources there.
+
+**Use case:** Dedicated monitoring per namespace/team.
+
+### Multi-Namespace
+
+Monitor CronJobs across multiple specific namespaces. The operator has cluster-wide RBAC but monitors are namespace-scoped.
+
+**Use case:** Central monitoring team managing multiple application namespaces.
+
+### Cluster-Wide
+
+Monitor all CronJobs across the entire cluster. Use `allNamespaces: true` in CronJobMonitor selector.
+
+**Use case:** Platform teams monitoring all workloads.
+
+**Note:** Global ignored namespaces (kube-system, kube-public, kube-node-lease) are always excluded.
+
+## Configuration Hierarchy
+
+Configuration is loaded with the following precedence (highest to lowest):
+
+1. **CLI flags** - `--log-level=debug`
+2. **Environment variables** - `GUARDIAN_LOG_LEVEL=debug`
+3. **Config file** - `/etc/cronjob-guardian/config.yaml`
+4. **Defaults** - Defined in `internal/config/config.go`
+
+See [Configuration](/operations/configuration) for all available options.

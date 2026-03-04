@@ -1,0 +1,826 @@
+---
+title: Security
+description: RBAC requirements, secrets management, network policies, and security best practices
+---
+
+## Overview
+
+CronJob Guardian follows Kubernetes security best practices with least-privilege RBAC, secure secret handling, and optional network isolation. This document covers security configuration and hardening recommendations.
+
+## RBAC Requirements
+
+The operator requires specific Kubernetes permissions to function. RBAC resources are defined in `config/rbac/`.
+
+### ServiceAccount
+
+**File:** `config/rbac/service_account.yaml`
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller-manager
+  namespace: cronjob-guardian
+  labels:
+    app.kubernetes.io/name: cronjob-guardian
+```
+
+### ClusterRole (Manager Role)
+
+**File:** `config/rbac/role.yaml`
+
+The main ClusterRole grants permissions needed by the operator:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+  # Read-only access to core resources
+  - apiGroups: [""]
+    resources:
+      - events
+      - namespaces
+      - pods
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  
+  # Read pod logs
+  - apiGroups: [""]
+    resources:
+      - pods/log
+    verbs:
+      - get
+  
+  # Read CronJobs and Jobs
+  - apiGroups: ["batch"]
+    resources:
+      - cronjobs
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+  
+  # Manage Guardian CRDs
+  - apiGroups: ["guardian.illenium.net"]
+    resources:
+      - alertchannels
+      - cronjobmonitors
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  
+  # Update finalizers
+  - apiGroups: ["guardian.illenium.net"]
+    resources:
+      - alertchannels/finalizers
+      - cronjobmonitors/finalizers
+    verbs:
+      - update
+  
+  # Update status subresources
+  - apiGroups: ["guardian.illenium.net"]
+    resources:
+      - alertchannels/status
+      - cronjobmonitors/status
+    verbs:
+      - get
+      - patch
+      - update
+```
+
+**Permissions summary:**
+- **Read-only:** Events, Namespaces, Pods, Secrets, CronJobs, Jobs, Pod logs
+- **Full access:** AlertChannel and CronJobMonitor CRDs
+- **No write access** to core Kubernetes resources (CronJobs, Jobs, Pods)
+
+### Leader Election Role
+
+**File:** `config/rbac/leader_election_role.yaml`
+
+Required when `leader-election.enabled: true`:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: leader-election-role
+  namespace: cronjob-guardian
+rules:
+  # Manage ConfigMaps for leader election
+  - apiGroups: [""]
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  
+  # Manage Leases for leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  
+  # Create events for leader election
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+```
+
+**Scope:** Namespace-scoped (only in operator namespace)
+
+### Metrics Authentication Role
+
+**File:** `config/rbac/metrics_auth_role.yaml`
+
+Required when `metrics.secure: true`:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: metrics-auth-role
+rules:
+  # Authenticate tokens
+  - apiGroups: ["authentication.k8s.io"]
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  
+  # Authorize access
+  - apiGroups: ["authorization.k8s.io"]
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+```
+
+**Purpose:** Allows operator to verify client tokens accessing metrics endpoint.
+
+### User Roles (Optional)
+
+Pre-defined roles for users managing Guardian resources:
+
+#### CronJobMonitor Roles
+
+**Admin:**
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cronjobmonitor-admin-role
+rules:
+  - apiGroups: ["guardian.illenium.net"]
+    resources: ["cronjobmonitors"]
+    verbs: ["*"]
+```
+
+**Editor:**
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cronjobmonitor-editor-role
+rules:
+  - apiGroups: ["guardian.illenium.net"]
+    resources: ["cronjobmonitors"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+```
+
+**Viewer:**
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cronjobmonitor-viewer-role
+rules:
+  - apiGroups: ["guardian.illenium.net"]
+    resources: ["cronjobmonitors"]
+    verbs: ["get", "list", "watch"]
+```
+
+#### AlertChannel Roles
+
+Similar admin/editor/viewer roles exist for AlertChannels.
+
+**Grant to users:**
+
+```bash
+# Grant editor role to user
+kubectl create rolebinding alice-cronjobmonitor-editor \
+  --clusterrole=cronjobmonitor-editor-role \
+  --user=alice@example.com \
+  --namespace=production
+```
+
+## Secrets Management
+
+CronJob Guardian uses Kubernetes Secrets for sensitive data like webhook URLs, API tokens, and SMTP passwords.
+
+### Channel Secrets
+
+AlertChannels reference secrets for credentials:
+
+**Example: Slack webhook secret**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: slack-webhook
+  namespace: cronjob-guardian
+type: Opaque
+stringData:
+  url: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+```
+
+**Referenced by AlertChannel:**
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts
+  namespace: cronjob-guardian
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook
+      namespace: cronjob-guardian
+      key: url
+```
+
+### Cross-Namespace Secret Access
+
+**Security consideration:** The operator can read secrets from any namespace (due to ClusterRole).
+
+**Best practices:**
+- Store channel secrets in operator namespace
+- Use namespace-scoped AlertChannels when possible
+- Audit secret access via API server audit logs
+- Consider using external secret managers (see below)
+
+### Database Credentials
+
+**PostgreSQL password via environment variable:**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: cronjob-guardian
+type: Opaque
+stringData:
+  password: your-secure-password
+```
+
+**Helm chart configuration:**
+
+```yaml
+config:
+  storage:
+    type: postgres
+    postgres:
+      existingSecret: postgres-credentials
+      existingSecretKey: password
+```
+
+**Result:** Secret mounted as environment variable `GUARDIAN_STORAGE_POSTGRES_PASSWORD`
+
+### External Secret Management
+
+Integrate with external secret managers:
+
+#### AWS Secrets Manager (External Secrets Operator)
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: slack-webhook
+  namespace: cronjob-guardian
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  target:
+    name: slack-webhook
+    creationPolicy: Owner
+  data:
+    - secretKey: url
+      remoteRef:
+        key: cronjob-guardian/slack-webhook
+        property: url
+```
+
+#### HashiCorp Vault
+
+```yaml
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: slack-webhook
+  namespace: cronjob-guardian
+spec:
+  vaultAuthRef: vault-auth
+  mount: secret
+  path: cronjob-guardian/slack-webhook
+  destination:
+    create: true
+    name: slack-webhook
+  refreshAfter: 30s
+```
+
+## Pod Security
+
+### Security Context
+
+The operator runs with restrictive security settings:
+
+**Deployment security context:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true  # If no writable volumes needed
+```
+
+**Helm values:**
+
+```yaml
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false  # Required for SQLite
+```
+
+### Pod Security Standards
+
+The operator complies with **Restricted** Pod Security Standard:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cronjob-guardian
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+```
+
+**Exception:** SQLite requires writable filesystem (`readOnlyRootFilesystem: false`). Use PostgreSQL/MySQL for fully read-only root filesystem.
+
+## Network Security
+
+### Network Policies
+
+#### Restrict Metrics Access
+
+**File:** `config/network-policy/allow-metrics-traffic.yaml`
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-traffic
+  namespace: cronjob-guardian
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cronjob-guardian
+  policyTypes:
+    - Ingress
+  ingress:
+    # Only allow Prometheus namespace
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            metrics: enabled
+      ports:
+        - port: 8443
+          protocol: TCP
+```
+
+**Enable metrics access:**
+
+```bash
+kubectl label namespace monitoring metrics=enabled
+```
+
+#### Restrict UI Access
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ui-traffic
+  namespace: cronjob-guardian
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cronjob-guardian
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from ingress controller
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+```
+
+#### Egress Policies
+
+Restrict outbound connections:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cronjob-guardian-egress
+  namespace: cronjob-guardian
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cronjob-guardian
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+    
+    # Allow Kubernetes API
+    - to:
+      - namespaceSelector: {}
+        podSelector:
+          matchLabels:
+            component: apiserver
+      ports:
+        - port: 6443
+          protocol: TCP
+    
+    # Allow database (adjust as needed)
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            name: database
+      ports:
+        - port: 5432  # PostgreSQL
+          protocol: TCP
+    
+    # Allow alert channels (Slack, PagerDuty, etc.)
+    - to:
+      - namespaceSelector: {}
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+### TLS Configuration
+
+#### Metrics Endpoint TLS
+
+**With cert-manager:**
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cronjob-guardian-metrics-cert
+  namespace: cronjob-guardian
+spec:
+  secretName: metrics-server-cert
+  issuerRef:
+    name: ca-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - cronjob-guardian-metrics.cronjob-guardian.svc
+    - cronjob-guardian-metrics.cronjob-guardian.svc.cluster.local
+```
+
+**Operator configuration:**
+
+```yaml
+metrics:
+  certPath: /etc/guardian/certs
+  certName: tls.crt
+  certKey: tls.key
+```
+
+**Helm chart:**
+
+```yaml
+metrics:
+  certPath: /etc/guardian/certs
+  certName: tls.crt
+  certKey: tls.key
+
+extraVolumes:
+  - name: metrics-certs
+    secret:
+      secretName: metrics-server-cert
+
+extraVolumeMounts:
+  - name: metrics-certs
+    mountPath: /etc/guardian/certs
+    readOnly: true
+```
+
+#### Database TLS
+
+**PostgreSQL with SSL:**
+
+```yaml
+storage:
+  postgres:
+    host: postgres.example.com
+    ssl-mode: verify-full
+```
+
+**With custom CA certificate:**
+
+```bash
+# Create secret with CA cert
+kubectl create secret generic postgres-ca-cert \
+  --from-file=ca.crt=/path/to/ca.crt \
+  --namespace cronjob-guardian
+```
+
+Mount and configure DSN with `sslrootcert` parameter (requires custom DSN construction).
+
+## Audit Logging
+
+### Kubernetes Audit Logs
+
+Enable audit logging to track Guardian API access:
+
+```yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Log Guardian CRD changes
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: guardian.illenium.net
+        resources:
+          - cronjobmonitors
+          - alertchannels
+  
+  # Log secret access by Guardian
+  - level: Metadata
+    verbs: ["get", "list"]
+    resources:
+      - group: ""
+        resources:
+          - secrets
+    users:
+      - system:serviceaccount:cronjob-guardian:controller-manager
+```
+
+### Application Logging
+
+**Sensitive data redaction:** The operator automatically redacts:
+- Secret values from logs
+- Database passwords
+- API tokens and webhook URLs
+
+**Enable debug logging:**
+
+```yaml
+config:
+  logLevel: debug
+```
+
+**Warning:** Debug logs may contain more detailed information. Use cautiously in production.
+
+## Security Best Practices
+
+### Deployment
+
+1. **Use least-privilege RBAC** - Only grant necessary permissions
+2. **Enable Pod Security Standards** - Use "Restricted" profile
+3. **Run as non-root** - Never use UID 0
+4. **Drop all capabilities** - No special Linux capabilities needed
+5. **Use read-only root filesystem** - Where possible (PostgreSQL/MySQL)
+6. **Enable seccomp** - Use RuntimeDefault profile
+7. **Network policies** - Restrict ingress and egress
+
+### Secrets
+
+1. **Use external secret managers** - AWS Secrets Manager, HashiCorp Vault
+2. **Rotate secrets regularly** - Automated rotation via External Secrets Operator
+3. **Namespace isolation** - Store secrets in operator namespace
+4. **Encrypt etcd** - Enable encryption at rest
+5. **Audit secret access** - Monitor who reads secrets
+6. **Never commit secrets** - Use .gitignore, scan repositories
+
+### Network
+
+1. **Enable TLS everywhere** - Metrics, webhooks, database connections
+2. **Use cert-manager** - Automated certificate management
+3. **Network policies** - Explicit allow-list approach
+4. **Private endpoints** - Don't expose UI/API publicly without authentication
+5. **mTLS for sensitive channels** - Consider mutual TLS for webhooks
+
+### Database
+
+1. **Strong passwords** - Use password generators
+2. **SSL/TLS required** - Never use plaintext connections
+3. **Separate database user** - Don't use database admin account
+4. **Connection limits** - Set appropriate pool sizes
+5. **Encrypt at rest** - Enable database encryption
+6. **Regular backups** - Automated, encrypted backups
+7. **Network isolation** - Database in private subnet
+
+### Monitoring
+
+1. **Audit logs enabled** - Track all Guardian operations
+2. **Alert on RBAC changes** - Monitor ClusterRole modifications
+3. **Monitor secret access** - Unusual secret read patterns
+4. **Track alert deliveries** - Failed alerts may indicate compromise
+5. **Resource limits** - Prevent resource exhaustion attacks
+
+## Compliance Considerations
+
+### Data Protection
+
+**What data is stored:**
+- Job execution metadata (timestamps, status, duration)
+- Exit codes and failure reasons
+- Pod logs (if enabled) - may contain sensitive information
+- Alert history
+
+**PII considerations:**
+- Job logs may contain customer data
+- Suggested fixes generated from logs
+- Alert messages sent to channels
+
+**Recommendations:**
+- Disable log storage unless required: `log-storage-enabled: false`
+- Use shorter retention: `log-retention-days: 7`
+- Implement data retention policies aligned with compliance requirements
+- Encrypt database at rest
+- Use encrypted backups
+- Implement access controls on UI/API
+
+### Access Controls
+
+**Who can access what:**
+- Cluster admins: Full access to Guardian resources and database
+- Namespace admins: Can create CronJobMonitors in their namespaces
+- Developers: Viewer access via RBAC
+- Operators: Access to UI/API (implement authentication)
+- Prometheus: Read-only metrics access
+
+**Recommendations:**
+- Implement authentication on UI/API (OAuth2, OIDC)
+- Use separate monitoring dashboards per team
+- Grant least-privilege RBAC
+- Regular access reviews
+
+## Incident Response
+
+### Compromise Scenarios
+
+**Scenario 1: Secret leakage**
+
+1. Rotate all affected secrets immediately
+2. Update AlertChannel resources with new secret references
+3. Check audit logs for unauthorized access
+4. Review alert history for suspicious activity
+
+**Scenario 2: Operator pod compromise**
+
+1. Delete compromised pod (new one will be created)
+2. Check for unauthorized CRD modifications
+3. Review database for data tampering
+4. Rotate database credentials
+5. Analyze container image for backdoors
+
+**Scenario 3: Database breach**
+
+1. Isolate database (network policies)
+2. Rotate database credentials
+3. Review data for exfiltration
+4. Restore from clean backup if needed
+5. Audit application logs
+
+### Security Contacts
+
+**Report security vulnerabilities:**
+- GitHub Security Advisories: https://github.com/iLLeniumStudios/cronjob-guardian/security/advisories
+- Email: security@illenium.net (if available)
+
+**Do not disclose publicly until patched.**
+
+## Security Checklist
+
+Production deployment security checklist:
+
+**RBAC:**
+- [ ] ServiceAccount with least-privilege ClusterRole
+- [ ] No cluster-admin permissions
+- [ ] User roles configured (admin/editor/viewer)
+- [ ] Regular RBAC audits scheduled
+
+**Secrets:**
+- [ ] All secrets stored in Kubernetes Secrets or external manager
+- [ ] No hardcoded credentials in configs
+- [ ] Secret rotation policy defined
+- [ ] etcd encryption at rest enabled
+
+**Network:**
+- [ ] NetworkPolicies configured (ingress + egress)
+- [ ] TLS enabled for metrics endpoint
+- [ ] Database connections use SSL/TLS
+- [ ] UI/API not publicly exposed or has authentication
+
+**Pod Security:**
+- [ ] runAsNonRoot: true
+- [ ] allowPrivilegeEscalation: false
+- [ ] capabilities dropped (ALL)
+- [ ] seccompProfile: RuntimeDefault
+- [ ] Pod Security Standards: Restricted
+
+**Database:**
+- [ ] Strong password (>20 characters)
+- [ ] SSL/TLS required for connections
+- [ ] Separate database user (not admin)
+- [ ] Connection pooling configured
+- [ ] Regular encrypted backups
+
+**Monitoring:**
+- [ ] Kubernetes audit logging enabled
+- [ ] Alerts on RBAC changes
+- [ ] Metrics access restricted
+- [ ] Failed alert delivery monitoring
+
+**Compliance:**
+- [ ] Data retention policy documented
+- [ ] Log storage disabled or justified
+- [ ] Access controls implemented
+- [ ] Regular security reviews scheduled

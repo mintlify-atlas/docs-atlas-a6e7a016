@@ -1,0 +1,476 @@
+---
+title: Configuration
+description: Configure the CronJob Guardian operator via config file, environment variables, or command-line flags
+---
+
+## Configuration Methods
+
+CronJob Guardian supports three configuration methods with the following precedence (highest to lowest):
+
+1. **Command-line flags** - `--log-level=debug`
+2. **Environment variables** - `GUARDIAN_LOG_LEVEL=debug`
+3. **Configuration file** - `/etc/cronjob-guardian/config.yaml` or specified via `--config`
+4. **Defaults** - Built into the application
+
+### Environment Variable Format
+
+Environment variables use the `GUARDIAN_` prefix and replace dots and hyphens with underscores:
+
+```bash
+# Config key: log-level
+GUARDIAN_LOG_LEVEL=debug
+
+# Config key: storage.type
+GUARDIAN_STORAGE_TYPE=postgres
+
+# Config key: storage.postgres.host
+GUARDIAN_STORAGE_POSTGRES_HOST=postgres.default.svc.cluster.local
+
+# Config key: scheduler.dead-man-switch-interval
+GUARDIAN_SCHEDULER_DEAD_MAN_SWITCH_INTERVAL=2m
+```
+
+## Configuration File
+
+The operator looks for `config.yaml` in these locations (in order):
+1. Path specified by `--config` flag
+2. `/etc/cronjob-guardian/config.yaml`
+3. `./config.yaml` (current directory)
+
+### Example Configuration
+
+```yaml
+# CronJob Guardian Configuration
+# Copy this file to config.yaml and modify as needed.
+
+# Log level: debug, info, warn, error
+log-level: info
+
+# Scheduler configuration for background tasks
+scheduler:
+  # How often to check dead-man's switches
+  dead-man-switch-interval: 1m
+  # How often to recalculate SLA metrics
+  sla-recalculation-interval: 5m
+  # How often to check for stuck jobs
+  stuck-job-check-interval: 1m
+  # How often to prune old execution history
+  prune-interval: 1h
+  # Grace period after startup before sending alerts
+  startup-grace-period: 30s
+
+# Storage backend configuration
+storage:
+  # Type: sqlite, postgres, mysql
+  type: sqlite
+
+  # SQLite configuration (used when type=sqlite)
+  sqlite:
+    path: /data/guardian.db
+
+  # PostgreSQL configuration (used when type=postgres)
+  # postgres:
+  #   host: postgres.default.svc.cluster.local
+  #   port: 5432
+  #   database: guardian
+  #   username: guardian
+  #   password: ""  # Use GUARDIAN_STORAGE_POSTGRES_PASSWORD env var
+  #   ssl-mode: require
+  #   pool:
+  #     max-idle-conns: 10
+  #     max-open-conns: 100
+  #     conn-max-lifetime: 1h
+  #     conn-max-idle-time: 10m
+
+  # MySQL configuration (used when type=mysql)
+  # mysql:
+  #   host: mysql.default.svc.cluster.local
+  #   port: 3306
+  #   database: guardian
+  #   username: guardian
+  #   password: ""  # Use GUARDIAN_STORAGE_MYSQL_PASSWORD env var
+  #   pool:
+  #     max-idle-conns: 10
+  #     max-open-conns: 100
+  #     conn-max-lifetime: 1h
+  #     conn-max-idle-time: 10m
+
+  # Enable storing job logs in database (default: false, opt-in)
+  log-storage-enabled: false
+  # Enable storing Kubernetes events in database (default: false, opt-in)
+  event-storage-enabled: false
+  # Maximum log size to store per execution in KB
+  max-log-size-kb: 100
+  # Log retention in days (0 = use history-retention.default-days)
+  log-retention-days: 0
+
+# History retention configuration
+history-retention:
+  # Default retention period in days
+  default-days: 30
+  # Maximum allowed retention period in days
+  max-days: 90
+
+# Rate limits to prevent alert storms
+rate-limits:
+  # Maximum alerts per minute across all channels
+  max-alerts-per-minute: 50
+  # Maximum burst of alerts allowed
+  burst-limit: 10
+  # Default duration to suppress duplicate alerts
+  default-suppress-duplicates-for: 1h
+
+# REST API and Web UI configuration
+ui:
+  # Enable the UI server (serves both web UI and REST API)
+  enabled: true
+  # Port for UI server
+  port: 8080
+
+# Metrics server configuration
+metrics:
+  # Bind address (use "0" to disable metrics)
+  bind-address: ":8443"
+  # Enable HTTPS for metrics
+  secure: true
+  # Certificate directory (optional)
+  # cert-path: /etc/guardian/certs
+  # cert-name: tls.crt
+  # cert-key: tls.key
+
+# Health probes configuration
+probes:
+  # Bind address for health probes
+  bind-address: ":8081"
+
+# Leader election configuration (for HA deployments)
+leader-election:
+  # Enable leader election
+  enabled: false
+  # Lease duration
+  lease-duration: 15s
+  # Renew deadline
+  renew-deadline: 10s
+  # Retry period
+  retry-period: 2s
+
+# Webhook server configuration
+webhook:
+  # Certificate directory (optional)
+  # cert-path: /etc/guardian/webhook-certs
+  # cert-name: tls.crt
+  # cert-key: tls.key
+  # Enable HTTP/2 for webhook server (default: false for security)
+  enable-http2: false
+```
+
+## Configuration Reference
+
+### Top-Level Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `log-level` | string | `info` | Logging level: `debug`, `info`, `warn`, `error` |
+| `config` | string | - | Path to config file (CLI flag only) |
+
+### Scheduler Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `scheduler.dead-man-switch-interval` | duration | `1m` | How often to check dead-man's switches |
+| `scheduler.sla-recalculation-interval` | duration | `5m` | How often to recalculate SLA metrics |
+| `scheduler.prune-interval` | duration | `1h` | How often to prune old execution history |
+| `scheduler.startup-grace-period` | duration | `30s` | Delay after startup before sending alerts |
+
+**Startup Grace Period:** Prevents alert floods when the operator restarts. Controllers need time to reconcile state before schedulers start checking for violations.
+
+### Storage Configuration
+
+#### General Storage Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `storage.type` | string | `sqlite` | Storage backend: `sqlite`, `postgres`, `mysql` |
+| `storage.log-storage-enabled` | bool | `false` | Store pod logs in database (opt-in) |
+| `storage.event-storage-enabled` | bool | `false` | Store Kubernetes events in database (opt-in) |
+| `storage.max-log-size-kb` | int | `100` | Maximum log size to store per execution (KB) |
+| `storage.log-retention-days` | int | `0` | Log retention period (0 = use history retention) |
+
+#### SQLite Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `storage.sqlite.path` | string | `/data/guardian.db` | Path to SQLite database file |
+
+**SQLite Notes:**
+- Uses pure Go driver (no CGO required)
+- WAL mode enabled automatically for better concurrency
+- Requires persistent volume for data persistence
+- Suitable for small to medium deployments (under 500 CronJobs)
+- Not recommended for HA deployments (file-based)
+
+#### PostgreSQL Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `storage.postgres.host` | string | - | PostgreSQL host |
+| `storage.postgres.port` | int | `5432` | PostgreSQL port |
+| `storage.postgres.database` | string | - | Database name |
+| `storage.postgres.username` | string | - | Database username |
+| `storage.postgres.password` | string | - | Database password (use env var instead) |
+| `storage.postgres.ssl-mode` | string | `require` | SSL mode: `disable`, `require`, `verify-ca`, `verify-full` |
+| `storage.postgres.pool.max-idle-conns` | int | `10` | Maximum idle connections in pool |
+| `storage.postgres.pool.max-open-conns` | int | `100` | Maximum open connections in pool |
+| `storage.postgres.pool.conn-max-lifetime` | duration | `1h` | Maximum connection lifetime |
+| `storage.postgres.pool.conn-max-idle-time` | duration | `10m` | Maximum idle time before closing |
+
+**PostgreSQL Notes:**
+- Recommended for production deployments
+- Supports native percentile functions for better performance
+- HA-ready with connection pooling
+- Use `GUARDIAN_STORAGE_POSTGRES_PASSWORD` environment variable for password
+
+#### MySQL Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `storage.mysql.host` | string | - | MySQL host |
+| `storage.mysql.port` | int | `3306` | MySQL port |
+| `storage.mysql.database` | string | - | Database name |
+| `storage.mysql.username` | string | - | Database username |
+| `storage.mysql.password` | string | - | Database password (use env var instead) |
+| `storage.mysql.pool.max-idle-conns` | int | `10` | Maximum idle connections in pool |
+| `storage.mysql.pool.max-open-conns` | int | `100` | Maximum open connections in pool |
+| `storage.mysql.pool.conn-max-lifetime` | duration | `1h` | Maximum connection lifetime |
+| `storage.mysql.pool.conn-max-idle-time` | duration | `10m` | Maximum idle time before closing |
+
+**MySQL Notes:**
+- Supports both MySQL and MariaDB
+- HA-ready with connection pooling
+- Use `GUARDIAN_STORAGE_MYSQL_PASSWORD` environment variable for password
+
+### History Retention
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `history-retention.default-days` | int | `30` | Default retention period in days |
+| `history-retention.max-days` | int | `90` | Maximum retention period allowed |
+
+**Retention behavior:**
+- Execution records older than `default-days` are automatically pruned
+- Logs can have separate retention via `storage.log-retention-days`
+- Per-monitor overrides respected (up to `max-days`)
+- Pruning runs every `scheduler.prune-interval`
+
+### Rate Limits
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `rate-limits.max-alerts-per-minute` | int | `50` | Maximum alerts per minute (all channels) |
+| `rate-limits.burst-limit` | int | `10` | Maximum burst of alerts allowed |
+| `rate-limits.default-suppress-duplicates-for` | duration | `1h` | Default duplicate suppression window |
+
+**Rate limiting behavior:**
+- Uses token bucket algorithm
+- Applies globally across all channels
+- Duplicate suppression per alert type + CronJob combination
+- Per-monitor overrides available in `CronJobMonitor.spec.alerting`
+
+### UI Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `ui.enabled` | bool | `true` | Enable the web UI and REST API |
+| `ui.port` | int | `8080` | Port to listen on |
+
+**UI features:**
+- Embedded React SPA (built into binary)
+- RESTful API at `/api/v1/*`
+- Swagger/OpenAPI docs at `/swagger/`
+- Dashboard, charts, heatmaps, execution history
+- Export to CSV/JSON
+
+### Metrics Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `metrics.bind-address` | string | `:8443` | Metrics endpoint address (use `0` to disable) |
+| `metrics.secure` | bool | `true` | Enable HTTPS for metrics |
+| `metrics.cert-path` | string | - | TLS certificate directory |
+| `metrics.cert-name` | string | `tls.crt` | TLS certificate filename |
+| `metrics.cert-key` | string | `tls.key` | TLS key filename |
+
+**Metrics security:**
+- HTTPS enabled by default
+- Supports authentication via SubjectAccessReview
+- Certificate rotation via cert-watcher
+- See [Prometheus Metrics](/operations/prometheus-metrics) for details
+
+### Probes Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `probes.bind-address` | string | `:8081` | Health probe bind address |
+
+**Probe endpoints:**
+- `GET /healthz` - Liveness probe
+- `GET /readyz` - Readiness probe
+
+### Leader Election
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `leader-election.enabled` | bool | `false` | Enable leader election (required for HA) |
+| `leader-election.lease-duration` | duration | `15s` | How long a leader holds the lease |
+| `leader-election.renew-deadline` | duration | `10s` | Leader must renew within this time |
+| `leader-election.retry-period` | duration | `2s` | How often to retry lease acquisition |
+
+**Leader election notes:**
+- Required for running multiple replicas
+- Only leader executes schedulers
+- All replicas serve metrics, UI, and handle controller reconciliations
+- Uses Kubernetes Lease resources for coordination
+
+### Webhook Configuration
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `webhook.cert-path` | string | - | Webhook TLS certificate directory |
+| `webhook.cert-name` | string | `tls.crt` | TLS certificate filename |
+| `webhook.cert-key` | string | `tls.key` | TLS key filename |
+| `webhook.enable-http2` | bool | `false` | Enable HTTP/2 (disabled for security) |
+
+**Webhook notes:**
+- HTTP/2 disabled by default due to CVE-2023-44487 (HTTP/2 Rapid Reset)
+- Certificate rotation supported via cert-watcher
+- Used for validating webhooks (future feature)
+
+## Helm Chart Configuration
+
+When deploying with Helm, use `values.yaml` to configure the operator. The Helm chart automatically generates the config file and environment variables.
+
+### Example Helm Values
+
+```yaml
+config:
+  logLevel: info
+  
+  storage:
+    type: postgres
+    postgres:
+      host: postgres.default.svc.cluster.local
+      port: 5432
+      database: guardian
+      username: guardian
+      existingSecret: postgres-credentials
+      existingSecretKey: password
+      sslMode: require
+      pool:
+        maxOpenConns: 100
+        maxIdleConns: 10
+  
+  scheduler:
+    startupGracePeriod: 30s
+  
+  rateLimits:
+    maxAlertsPerMinute: 100
+
+leaderElection:
+  enabled: true
+
+replicaCount: 3
+```
+
+See the [Helm chart values.yaml](https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/deploy/helm/cronjob-guardian/values.yaml) for all available options.
+
+## Database Connection Strings
+
+The operator constructs database DSNs automatically from the configuration:
+
+### SQLite
+```
+/data/guardian.db?_journal_mode=WAL&_busy_timeout=5000
+```
+
+### PostgreSQL
+```
+host=postgres.default.svc.cluster.local port=5432 \
+  user=guardian password=secret \
+  dbname=guardian sslmode=require
+```
+
+### MySQL
+```
+guardian:secret@tcp(mysql.default.svc.cluster.local:3306)/guardian?parseTime=true
+```
+
+## Best Practices
+
+### Security
+- Use environment variables for sensitive values (passwords, API tokens)
+- Never commit passwords to version control
+- Enable TLS for metrics and webhooks in production
+- Use SSL/TLS for PostgreSQL/MySQL connections
+
+### Performance
+- Use PostgreSQL or MySQL for large deployments (>500 CronJobs)
+- Tune connection pool settings based on workload
+- Adjust retention periods to balance history vs storage
+- Disable log/event storage unless needed (increases DB size)
+
+### High Availability
+- Enable leader election with 3+ replicas
+- Use external database (PostgreSQL/MySQL) for shared state
+- Configure appropriate resource limits
+- Use Pod Disruption Budgets (PDB) for planned disruptions
+
+### Alerting
+- Start with conservative rate limits
+- Use `startup-grace-period` to avoid restart alert floods
+- Configure duplicate suppression per use case
+- Test alert channels before production deployment
+
+## Troubleshooting
+
+### Configuration not loading
+
+Check precedence order. Command-line flags and environment variables override config file values.
+
+```bash
+# Verify which config file is loaded
+kubectl logs -n cronjob-guardian deploy/cronjob-guardian | grep "configuration loaded"
+
+# Output shows:
+# configuration loaded file="/etc/cronjob-guardian/config.yaml" level="info"
+```
+
+### Database connection errors
+
+```bash
+# PostgreSQL connection test
+kubectl exec -it deploy/cronjob-guardian -n cronjob-guardian -- \
+  psql -h postgres.default.svc.cluster.local -U guardian -d guardian
+
+# Check password is set
+kubectl exec -it deploy/cronjob-guardian -n cronjob-guardian -- \
+  env | grep GUARDIAN_STORAGE
+```
+
+### Rate limiting issues
+
+Increase rate limits if alerts are being dropped:
+
+```yaml
+rate-limits:
+  max-alerts-per-minute: 100
+  burst-limit: 20
+```
+
+### Leader election not working
+
+Check lease status:
+
+```bash
+kubectl get lease -n cronjob-guardian
+kubectl describe lease cronjob-guardian -n cronjob-guardian
+```

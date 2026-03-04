@@ -1,0 +1,331 @@
+---
+title: Monitoring CronJobs
+description: Learn how to monitor CronJobs at namespace, cluster-wide, and by label selectors
+---
+
+CronJob Guardian provides flexible monitoring options to track your CronJobs across different scopes and selectors.
+
+## Monitoring Strategies
+
+You can monitor CronJobs in several ways:
+- **Single namespace**: Monitor all or selected CronJobs in one namespace
+- **Multiple namespaces**: Monitor specific namespaces by listing them
+- **Namespace selector**: Dynamically discover namespaces by labels
+- **Cluster-wide**: Monitor all CronJobs across all namespaces
+- **Label selector**: Filter CronJobs by labels
+
+## Basic Namespace Monitoring
+
+The simplest way to monitor CronJobs is within a single namespace.
+
+<Steps>
+  <Step title="Create a CronJobMonitor in your namespace">
+    Deploy a monitor in the same namespace as your CronJobs. An empty selector monitors all CronJobs in that namespace.
+
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: CronJobMonitor
+    metadata:
+      name: critical-jobs
+      namespace: production
+    spec:
+      selector:
+        matchLabels:
+          tier: critical
+      deadManSwitch:
+        enabled: true
+        maxTimeSinceLastSuccess: 25h
+      sla:
+        enabled: true
+        minSuccessRate: 99
+        windowDays: 7
+      alerting:
+        channelRefs:
+          - name: slack-ops
+    ```
+  </Step>
+
+  <Step title="Apply the monitor">
+    ```bash
+    kubectl apply -f monitor.yaml
+    ```
+  </Step>
+
+  <Step title="Verify the monitor is active">
+    ```bash
+    kubectl get cronjobmonitor -n production
+    ```
+
+    Check the status to see discovered CronJobs:
+    ```bash
+    kubectl describe cronjobmonitor critical-jobs -n production
+    ```
+  </Step>
+</Steps>
+
+## Label-Based Monitoring
+
+Monitor CronJobs that match specific labels using `matchLabels` or `matchExpressions`.
+
+### Using matchLabels
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: critical-jobs
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+```
+
+### Using matchExpressions
+
+For more advanced filtering:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: high-priority-jobs
+  namespace: production
+spec:
+  selector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [critical, high]
+      - key: backup
+        operator: Exists
+```
+
+<Note>
+  **Supported operators**: `In`, `NotIn`, `Exists`, `DoesNotExist`
+</Note>
+
+## Monitoring Specific CronJobs by Name
+
+You can explicitly list CronJob names to monitor (only valid for single-namespace monitoring):
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: backup-jobs
+  namespace: databases
+spec:
+  selector:
+    matchNames:
+      - daily-backup
+      - weekly-report
+      - monthly-archive
+```
+
+## Cluster-Wide Monitoring
+
+Monitor all CronJobs across all namespaces (except globally ignored ones).
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-wide-monitor
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Watch all namespaces
+    allNamespaces: true
+    # Optionally filter by labels
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: pagerduty-critical
+        severities: [critical]
+      - name: slack-ops
+        severities: [critical, warning]
+```
+
+<Warning>
+  Cluster-wide monitoring requires appropriate RBAC permissions. The operator's service account must have cluster-wide read access to CronJobs.
+</Warning>
+
+## Namespace Selector Monitoring
+
+Dynamically discover and monitor namespaces that match specific labels.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-jobs
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Select namespaces by their labels
+    namespaceSelector:
+      matchLabels:
+        environment: production
+    # Optionally filter CronJobs within matching namespaces
+    matchLabels:
+      monitored: "true"
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+<Steps>
+  <Step title="Label your namespaces">
+    ```bash
+    kubectl label namespace prod-app environment=production
+    kubectl label namespace prod-api environment=production
+    ```
+  </Step>
+
+  <Step title="Create the monitor with namespace selector">
+    The monitor will automatically discover all namespaces labeled `environment=production` and watch CronJobs within them.
+  </Step>
+
+  <Step title="Verify discovered namespaces">
+    ```bash
+    kubectl describe cronjobmonitor production-jobs -n cronjob-guardian
+    ```
+  </Step>
+</Steps>
+
+## Multi-Namespace Monitoring
+
+Explicitly list multiple namespaces to monitor:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: multi-namespace-monitor
+  namespace: cronjob-guardian
+spec:
+  selector:
+    namespaces:
+      - production
+      - staging
+      - qa
+    matchLabels:
+      monitored: "true"
+```
+
+## Real-World Example: Database Backups
+
+Here's a complete example monitoring critical database backup jobs:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h  # Daily backups with 1h buffer
+  sla:
+    enabled: true
+    minSuccessRate: 100  # Backups must never fail
+    maxDuration: 1h      # Alert if backup takes too long
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+        severities: [critical]
+    severityOverrides:
+      jobFailed: critical
+      deadManTriggered: critical
+    # Custom fix suggestion for backup failures
+    suggestedFixPatterns:
+      - name: disk-full
+        match:
+          logPattern: "No space left on device|disk full"
+        suggestion: "Backup storage is full. Check PVC usage: kubectl get pvc -n {\{.Namespace}\}"
+        priority: 150
+```
+
+## Monitoring Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Start Small" icon="seedling">
+    Begin with namespace-scoped monitors before moving to cluster-wide monitoring.
+  </Card>
+  <Card title="Use Labels" icon="tags">
+    Label your CronJobs consistently (e.g., `tier: critical`, `type: backup`) for easier monitoring.
+  </Card>
+  <Card title="Avoid Overlap" icon="layer-group">
+    Ensure monitors don't overlap unnecessarily. If multiple monitors watch the same CronJob, you'll get duplicate alerts.
+  </Card>
+  <Card title="Monitor the Monitor" icon="heartbeat">
+    Use `kubectl get cronjobmonitor` regularly to verify monitors are in `Active` phase.
+  </Card>
+</CardGroup>
+
+## Checking Monitor Status
+
+View all monitors and their status:
+
+```bash
+kubectl get cronjobmonitor -A
+```
+
+Expected output:
+```
+NAMESPACE           NAME                    CRONJOBS   HEALTHY   WARNING   CRITICAL   ALERTS   AGE
+production          critical-jobs           5          4         1         0          1        2d
+cronjob-guardian    cluster-wide-monitor    42         39        2         1          3        5d
+databases           database-backups        3          3         0         0          0        10d
+```
+
+View detailed status for a specific monitor:
+
+```bash
+kubectl describe cronjobmonitor critical-jobs -n production
+```
+
+## Ignored Namespaces
+
+By default, these namespaces are ignored (configured in `config.yaml`):
+
+```yaml
+ignored-namespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+```
+
+To override this globally, update the operator configuration:
+
+```yaml
+# values.yaml for Helm chart
+config:
+  ignoredNamespaces:
+    - kube-system
+    - kube-public
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configure Alerts" icon="bell" href="/guides/configuring-alerts">
+    Set up alert channels and routing
+  </Card>
+  <Card title="SLA Configuration" icon="chart-line" href="/guides/sla-configuration">
+    Configure success rate and duration tracking
+  </Card>
+</CardGroup>

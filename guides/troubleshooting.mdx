@@ -1,0 +1,570 @@
+---
+title: Troubleshooting
+description: Common issues and solutions for CronJob Guardian
+---
+
+This guide covers common issues you may encounter when using CronJob Guardian and how to resolve them.
+
+## Monitor Not Discovering CronJobs
+
+### Symptoms
+
+CronJobMonitor shows `totalCronJobs: 0` even though CronJobs exist in the namespace.
+
+### Possible Causes and Solutions
+
+<Steps>
+  <Step title="Verify the monitor is in Active phase">
+    ```bash
+    kubectl get cronjobmonitor my-monitor -n production
+    ```
+    
+    If the phase is not `Active`, check the monitor's conditions:
+    
+    ```bash
+    kubectl describe cronjobmonitor my-monitor -n production
+    ```
+  </Step>
+  
+  <Step title="Check the selector configuration">
+    Ensure your selector matches the CronJob labels:
+    
+    ```bash
+    # List CronJobs with labels
+    kubectl get cronjob -n production --show-labels
+    
+    # Check if your selector matches
+    kubectl get cronjobmonitor my-monitor -n production -o yaml | grep -A 10 selector
+    ```
+  </Step>
+  
+  <Step title="Verify namespace permissions">
+    For cluster-wide or multi-namespace monitoring, ensure the Guardian service account has proper RBAC permissions:
+    
+    ```bash
+    kubectl auth can-i list cronjobs --as=system:serviceaccount:cronjob-guardian:cronjob-guardian-controller -n production
+    ```
+    
+    Should return `yes`.
+  </Step>
+  
+  <Step title="Check ignored namespaces">
+    Verify the namespace isn't in the ignored list:
+    
+    ```bash
+    kubectl get configmap cronjob-guardian-config -n cronjob-guardian -o yaml | grep -A 5 ignored-namespaces
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  If monitoring fails silently, check the controller logs:
+  
+  ```bash
+  kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller
+  ```
+</Warning>
+
+## Alerts Not Being Sent
+
+### Symptoms
+
+Jobs are failing, but no alerts are received in Slack, PagerDuty, etc.
+
+### Diagnosis Steps
+
+<Steps>
+  <Step title="Check if alerts are active in the monitor status">
+    ```bash
+    kubectl describe cronjobmonitor my-monitor -n production | grep -A 10 "Active Alerts"
+    ```
+    
+    If alerts are listed here, the monitor is detecting failures.
+  </Step>
+  
+  <Step title="Verify AlertChannel is ready">
+    ```bash
+    kubectl get alertchannel -A
+    ```
+    
+    Ensure the `READY` column shows `true`.
+    
+    If `false`, check the AlertChannel status:
+    
+    ```bash
+    kubectl describe alertchannel slack-alerts
+    ```
+  </Step>
+  
+  <Step title="Test the alert channel">
+    Send a test alert:
+    
+    ```bash
+    curl -X POST http://localhost:8080/api/v1/channels/slack-alerts/test
+    ```
+    
+    Or via the dashboard: **Channels** → select channel → **Send Test Alert**.
+  </Step>
+  
+  <Step title="Check alert channel references in the monitor">
+    ```bash
+    kubectl get cronjobmonitor my-monitor -n production -o yaml | grep -A 5 channelRefs
+    ```
+    
+    Ensure the channel name matches the AlertChannel resource name.
+  </Step>
+  
+  <Step title="Verify severity routing">
+    ```yaml
+    alerting:
+      channelRefs:
+        - name: slack-alerts
+          severities: [critical, warning]  # Ensure this includes the alert severity
+    ```
+    
+    If you only route `critical` but the alert is `warning`, it won't be sent to that channel.
+  </Step>
+  
+  <Step title="Check rate limiting">
+    ```bash
+    kubectl get alertchannel slack-alerts -o yaml | grep -A 5 rateLimiting
+    ```
+    
+    If you're hitting rate limits, increase them or reduce alert volume.
+  </Step>
+</Steps>
+
+### Common Alert Channel Issues
+
+#### Slack Webhook Invalid
+
+```bash
+kubectl describe alertchannel slack-alerts
+```
+
+If you see errors like `invalid webhook URL` or `401 Unauthorized`:
+
+1. Verify the webhook URL is correct
+2. Regenerate the webhook in Slack if necessary
+3. Update the secret:
+
+```bash
+kubectl delete secret slack-webhook -n cronjob-guardian
+kubectl create secret generic slack-webhook \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://hooks.slack.com/services/YOUR/NEW/URL
+```
+
+#### PagerDuty Routing Key Invalid
+
+Check the PagerDuty routing key:
+
+```bash
+kubectl get secret pagerduty-key -n cronjob-guardian -o jsonpath='{.data.routing-key}' | base64 -d
+```
+
+Ensure it matches your PagerDuty service integration key.
+
+## Dead-Man's Switch Not Triggering
+
+### Symptoms
+
+CronJob hasn't run in days, but no dead-man's switch alert is sent.
+
+### Solutions
+
+<Steps>
+  <Step title="Verify dead-man's switch is enabled">
+    ```bash
+    kubectl get cronjobmonitor my-monitor -n production -o yaml | grep -A 5 deadManSwitch
+    ```
+    
+    Ensure `enabled: true`.
+  </Step>
+  
+  <Step title="Check the time window">
+    ```yaml
+    deadManSwitch:
+      enabled: true
+      maxTimeSinceLastSuccess: 25h  # Must exceed CronJob schedule
+    ```
+    
+    If your job runs daily, the window should be > 24h (e.g., 25h with buffer).
+  </Step>
+  
+  <Step title="Verify the job has succeeded at least once">
+    Dead-man's switch requires at least one successful run. Check execution history:
+    
+    ```bash
+    curl http://localhost:8080/api/v1/cronjobs/production/my-job/executions
+    ```
+  </Step>
+  
+  <Step title="Check if the CronJob is suspended">
+    ```bash
+    kubectl get cronjob my-job -n production -o jsonpath='{.spec.suspend}'
+    ```
+    
+    If `true`, and `suspendedHandling.pauseMonitoring: true`, the dead-man's switch is paused.
+  </Step>
+</Steps>
+
+## SLA Not Updating
+
+### Symptoms
+
+Success rate and duration metrics are stale or show 0%.
+
+### Solutions
+
+<Steps>
+  <Step title="Check if SLA analyzer is running">
+    ```bash
+    curl http://localhost:8080/api/v1/health | jq '.analyzerEnabled'
+    ```
+    
+    Should return `true`.
+  </Step>
+  
+  <Step title="Verify execution history is being stored">
+    ```bash
+    curl http://localhost:8080/api/v1/cronjobs/production/my-job/executions
+    ```
+    
+    If empty, check storage configuration.
+  </Step>
+  
+  <Step title="Check SLA recalculation interval">
+    ```bash
+    kubectl get configmap cronjob-guardian-config -n cronjob-guardian -o yaml | grep sla-recalculation-interval
+    ```
+    
+    Default is 5 minutes. Metrics update on this schedule.
+  </Step>
+  
+  <Step title="Verify SLA is enabled for the monitor">
+    ```bash
+    kubectl get cronjobmonitor my-monitor -n production -o yaml | grep -A 5 sla
+    ```
+  </Step>
+</Steps>
+
+## Storage Issues
+
+### Database Connection Errors
+
+```bash
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller | grep -i "storage\|database"
+```
+
+Common errors:
+
+#### SQLite: Permission Denied
+
+Ensure the persistent volume has correct permissions:
+
+```yaml
+# values.yaml
+storage:
+  type: sqlite
+  sqlite:
+    persistence:
+      enabled: true
+      storageClass: standard
+      accessModes:
+        - ReadWriteOnce
+```
+
+#### PostgreSQL: Connection Refused
+
+Verify the PostgreSQL service is reachable:
+
+```bash
+kubectl run -it --rm debug --image=postgres:15 --restart=Never -- \
+  psql -h postgres.default.svc.cluster.local -U guardian -d guardian
+```
+
+If connection fails, check:
+- PostgreSQL is running: `kubectl get pod -l app=postgresql`
+- Service exists: `kubectl get svc postgres`
+- Credentials are correct in the secret
+
+### Execution History Not Stored
+
+<Steps>
+  <Step title="Check storage health">
+    ```bash
+    curl http://localhost:8080/api/v1/admin/storage-stats
+    ```
+    
+    Ensure `healthy: true`.
+  </Step>
+  
+  <Step title="Verify storage backend is configured">
+    ```bash
+    kubectl get configmap cronjob-guardian-config -n cronjob-guardian -o yaml | grep -A 10 storage
+    ```
+  </Step>
+  
+  <Step title="Check for write errors in logs">
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller | grep -i "failed to.*execution"
+    ```
+  </Step>
+</Steps>
+
+## High Memory Usage
+
+### Symptoms
+
+Guardian controller pod is OOMKilled or uses excessive memory.
+
+### Solutions
+
+<Steps>
+  <Step title="Reduce log storage">
+    Disable log storage or reduce max log size:
+    
+    ```yaml
+    # values.yaml
+    storage:
+      logStorageEnabled: false  # Or reduce maxLogSizeKB
+      maxLogSizeKB: 100  # Default: 200
+    ```
+  </Step>
+  
+  <Step title="Shorten retention period">
+    ```yaml
+    historyRetention:
+      defaultDays: 7  # Reduce from 30
+    ```
+  </Step>
+  
+  <Step title="Reduce monitored CronJobs">
+    If monitoring hundreds of CronJobs, consider splitting into multiple monitors or using more specific selectors.
+  </Step>
+  
+  <Step title="Increase memory limits">
+    ```yaml
+    # values.yaml
+    resources:
+      limits:
+        memory: 512Mi  # Increase from default
+      requests:
+        memory: 256Mi
+    ```
+  </Step>
+</Steps>
+
+## Controller Crashes or Restarts
+
+### Diagnosis
+
+```bash
+# Check pod status
+kubectl get pod -n cronjob-guardian
+
+# View recent logs
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller --tail=100
+
+# Check previous logs if pod restarted
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller --previous
+```
+
+### Common Causes
+
+#### Panic in Reconciliation Loop
+
+Look for panic stack traces in logs. If you find a bug, report it with:
+
+- Full stack trace
+- CronJobMonitor YAML that triggered the panic
+- Guardian version
+
+```bash
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller | grep -A 50 "panic"
+```
+
+#### Leader Election Issues
+
+If running multiple replicas:
+
+```bash
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller | grep -i "leader"
+```
+
+Ensure only one pod is the leader at a time.
+
+## API Server Not Responding
+
+### Symptoms
+
+Dashboard is unreachable or API requests timeout.
+
+### Solutions
+
+<Steps>
+  <Step title="Verify API is enabled">
+    ```bash
+    kubectl get configmap cronjob-guardian-config -n cronjob-guardian -o yaml | grep -A 5 api
+    ```
+    
+    Ensure `enabled: true`.
+  </Step>
+  
+  <Step title="Check API service">
+    ```bash
+    kubectl get svc -n cronjob-guardian cronjob-guardian-api
+    ```
+    
+    Verify endpoints exist:
+    
+    ```bash
+    kubectl get endpoints -n cronjob-guardian cronjob-guardian-api
+    ```
+  </Step>
+  
+  <Step title="Test API from within cluster">
+    ```bash
+    kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+      curl http://cronjob-guardian-api.cronjob-guardian.svc.cluster.local:8080/api/v1/health
+    ```
+  </Step>
+  
+  <Step title="Check controller logs for API errors">
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller | grep -i "api server"
+    ```
+  </Step>
+</Steps>
+
+## Prometheus Metrics Not Scraped
+
+### Verify ServiceMonitor
+
+```bash
+kubectl get servicemonitor -n cronjob-guardian
+```
+
+If using Prometheus Operator, ensure the ServiceMonitor is created and matches your Prometheus selector:
+
+```bash
+kubectl get prometheus -A -o yaml | grep serviceMonitorSelector
+```
+
+### Test Metrics Endpoint
+
+```bash
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+  curl http://cronjob-guardian-controller-metrics.cronjob-guardian.svc.cluster.local:8443/metrics
+```
+
+## Common Configuration Mistakes
+
+### Incorrect Namespace for AlertChannel
+
+AlertChannels are **cluster-scoped**, so they don't have a namespace:
+
+```yaml
+# Wrong
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts
+  namespace: production  # Remove this
+
+# Correct
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts  # No namespace
+```
+
+### Selector Doesn't Match Any CronJobs
+
+```bash
+# List CronJobs with labels
+kubectl get cronjob -n production --show-labels
+
+# Check if your matchLabels align
+kubectl get cronjobmonitor my-monitor -n production -o yaml | grep -A 5 matchLabels
+```
+
+### Wrong Timezone in Maintenance Windows
+
+Use IANA timezone names, not abbreviations:
+
+```yaml
+# Wrong
+timezone: PST
+
+# Correct
+timezone: America/Los_Angeles
+```
+
+## Getting Help
+
+If you're still stuck:
+
+<CardGroup cols={2}>
+  <Card title="Check Logs" icon="file-lines">
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller --tail=200
+    ```
+  </Card>
+  
+  <Card title="Describe Resources" icon="magnifying-glass">
+    ```bash
+    kubectl describe cronjobmonitor my-monitor -n production
+    kubectl describe alertchannel slack-alerts
+    ```
+  </Card>
+  
+  <Card title="Check Events" icon="calendar-exclamation">
+    ```bash
+    kubectl get events -n cronjob-guardian --sort-by='.lastTimestamp'
+    ```
+  </Card>
+  
+  <Card title="Report Issues" icon="github">
+    Open an issue on [GitHub](https://github.com/iLLeniumStudios/cronjob-guardian/issues) with:
+    - Guardian version
+    - Kubernetes version
+    - Relevant logs and configuration
+  </Card>
+</CardGroup>
+
+## Debugging Checklist
+
+Before reporting an issue, gather this information:
+
+```bash
+# Guardian version
+kubectl get deployment -n cronjob-guardian cronjob-guardian-controller -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+# Kubernetes version
+kubectl version --short
+
+# Monitor status
+kubectl describe cronjobmonitor my-monitor -n production
+
+# Controller logs
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller --tail=200 > guardian-logs.txt
+
+# Health status
+curl http://localhost:8080/api/v1/health
+
+# Storage stats
+curl http://localhost:8080/api/v1/admin/storage-stats
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Production Setup" icon="server" href="/operations/architecture">
+    Best practices for production deployments
+  </Card>
+  <Card title="API Reference" icon="code" href="/guides/dashboard#api-endpoints">
+    Complete REST API documentation
+  </Card>
+</CardGroup>

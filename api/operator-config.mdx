@@ -1,0 +1,610 @@
+---
+title: "Operator Configuration Reference"
+description: "Complete reference for CronJob Guardian operator configuration"
+---
+
+## Overview
+
+The CronJob Guardian operator can be configured via:
+
+1. **Config file** (YAML) - `/etc/cronjob-guardian/config.yaml` or via `--config` flag
+2. **Environment variables** - Prefix with `GUARDIAN_` and replace dots/hyphens with underscores
+3. **Command-line flags** - Direct flags to the operator binary
+
+**Precedence (highest to lowest):** CLI flags → Environment variables → Config file → Defaults
+
+## Configuration File Format
+
+```yaml
+# config.yaml
+log-level: info
+
+scheduler:
+  dead-man-switch-interval: 1m
+  sla-recalculation-interval: 5m
+  prune-interval: 1h
+  startup-grace-period: 30s
+
+storage:
+  type: sqlite
+  sqlite:
+    path: /data/guardian.db
+
+history-retention:
+  default-days: 30
+  max-days: 90
+
+rate-limits:
+  max-alerts-per-minute: 50
+  burst-limit: 10
+  default-suppress-duplicates-for: 1h
+
+ui:
+  enabled: true
+  port: 8080
+
+metrics:
+  bind-address: ":8443"
+  secure: true
+
+probes:
+  bind-address: ":8081"
+
+leader-election:
+  enabled: false
+  lease-duration: 15s
+  renew-deadline: 10s
+  retry-period: 2s
+
+webhook:
+  enable-http2: false
+```
+
+## Configuration Options
+
+### log-level
+
+<ParamField path="log-level" type="string" default="info">
+  Logging level for operator output.
+  
+  **Valid values:** `debug`, `info`, `warn`, `error`
+  
+  **Environment variable:** `GUARDIAN_LOG_LEVEL`
+  
+  **CLI flag:** `--log-level`
+</ParamField>
+
+## Scheduler Configuration
+
+Controls background task execution intervals.
+
+<ParamField path="scheduler.dead-man-switch-interval" type="duration" default="1m">
+  How often to check dead-man's switches across all monitors.
+  
+  **Environment variable:** `GUARDIAN_SCHEDULER_DEAD_MAN_SWITCH_INTERVAL`
+  
+  **CLI flag:** `--scheduler.dead-man-switch-interval`
+</ParamField>
+
+<ParamField path="scheduler.sla-recalculation-interval" type="duration" default="5m">
+  How often to recalculate SLA metrics (success rates, duration percentiles).
+  
+  **Environment variable:** `GUARDIAN_SCHEDULER_SLA_RECALCULATION_INTERVAL`
+  
+  **CLI flag:** `--scheduler.sla-recalculation-interval`
+</ParamField>
+
+<ParamField path="scheduler.prune-interval" type="duration" default="1h">
+  How often to prune old execution history based on retention policies.
+  
+  **Environment variable:** `GUARDIAN_SCHEDULER_PRUNE_INTERVAL`
+  
+  **CLI flag:** `--scheduler.prune-interval`
+</ParamField>
+
+<ParamField path="scheduler.startup-grace-period" type="duration" default="30s">
+  Delay after operator startup before sending alerts. Prevents alert floods when the operator restarts and reconciles existing resources.
+  
+  **Environment variable:** `GUARDIAN_SCHEDULER_STARTUP_GRACE_PERIOD`
+  
+  **CLI flag:** `--scheduler.startup-grace-period`
+</ParamField>
+
+## Storage Configuration
+
+Configures the database backend for execution history and metrics.
+
+<ParamField path="storage.type" type="string" default="sqlite">
+  Storage backend type.
+  
+  **Valid values:** `sqlite`, `postgres`, `mysql`
+  
+  **Environment variable:** `GUARDIAN_STORAGE_TYPE`
+  
+  **CLI flag:** `--storage.type`
+</ParamField>
+
+### SQLite Configuration
+
+Used when `storage.type` is `sqlite`.
+
+<ParamField path="storage.sqlite.path" type="string" default="/data/guardian.db">
+  Path to the SQLite database file. Requires a persistent volume in Kubernetes.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_SQLITE_PATH`
+  
+  **CLI flag:** `--storage.sqlite.path`
+</ParamField>
+
+### PostgreSQL Configuration
+
+Used when `storage.type` is `postgres`.
+
+<ParamField path="storage.postgres.host" type="string">
+  PostgreSQL server hostname.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_HOST`
+  
+  **CLI flag:** `--storage.postgres.host`
+</ParamField>
+
+<ParamField path="storage.postgres.port" type="integer" default="5432">
+  PostgreSQL server port.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_PORT`
+  
+  **CLI flag:** `--storage.postgres.port`
+</ParamField>
+
+<ParamField path="storage.postgres.database" type="string">
+  PostgreSQL database name.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_DATABASE`
+  
+  **CLI flag:** `--storage.postgres.database`
+</ParamField>
+
+<ParamField path="storage.postgres.username" type="string">
+  PostgreSQL username.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_USERNAME`
+  
+  **CLI flag:** `--storage.postgres.username`
+</ParamField>
+
+<ParamField path="storage.postgres.password" type="string">
+  PostgreSQL password. **Recommend using environment variable instead of config file.**
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_PASSWORD`
+  
+  **CLI flag:** `--storage.postgres.password`
+</ParamField>
+
+<ParamField path="storage.postgres.ssl-mode" type="string" default="require">
+  PostgreSQL SSL mode.
+  
+  **Valid values:** `disable`, `require`, `verify-ca`, `verify-full`
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_SSL_MODE`
+  
+  **CLI flag:** `--storage.postgres.ssl-mode`
+</ParamField>
+
+<ParamField path="storage.postgres.pool.max-idle-conns" type="integer" default="10">
+  Maximum number of idle connections in the pool.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_POOL_MAX_IDLE_CONNS`
+  
+  **CLI flag:** `--storage.postgres.pool.max-idle-conns`
+</ParamField>
+
+<ParamField path="storage.postgres.pool.max-open-conns" type="integer" default="100">
+  Maximum number of open connections.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_POOL_MAX_OPEN_CONNS`
+  
+  **CLI flag:** `--storage.postgres.pool.max-open-conns`
+</ParamField>
+
+<ParamField path="storage.postgres.pool.conn-max-lifetime" type="duration" default="1h">
+  Maximum lifetime of a connection.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_POOL_CONN_MAX_LIFETIME`
+  
+  **CLI flag:** `--storage.postgres.pool.conn-max-lifetime`
+</ParamField>
+
+<ParamField path="storage.postgres.pool.conn-max-idle-time" type="duration" default="10m">
+  Maximum idle time for a connection before it's closed.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_POSTGRES_POOL_CONN_MAX_IDLE_TIME`
+  
+  **CLI flag:** `--storage.postgres.pool.conn-max-idle-time`
+</ParamField>
+
+### MySQL Configuration
+
+Used when `storage.type` is `mysql`.
+
+<ParamField path="storage.mysql.host" type="string">
+  MySQL server hostname.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_HOST`
+  
+  **CLI flag:** `--storage.mysql.host`
+</ParamField>
+
+<ParamField path="storage.mysql.port" type="integer" default="3306">
+  MySQL server port.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_PORT`
+  
+  **CLI flag:** `--storage.mysql.port`
+</ParamField>
+
+<ParamField path="storage.mysql.database" type="string">
+  MySQL database name.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_DATABASE`
+  
+  **CLI flag:** `--storage.mysql.database`
+</ParamField>
+
+<ParamField path="storage.mysql.username" type="string">
+  MySQL username.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_USERNAME`
+  
+  **CLI flag:** `--storage.mysql.username`
+</ParamField>
+
+<ParamField path="storage.mysql.password" type="string">
+  MySQL password. **Recommend using environment variable instead of config file.**
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_PASSWORD`
+  
+  **CLI flag:** `--storage.mysql.password`
+</ParamField>
+
+<ParamField path="storage.mysql.pool.max-idle-conns" type="integer" default="10">
+  Maximum number of idle connections in the pool.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_POOL_MAX_IDLE_CONNS`
+  
+  **CLI flag:** `--storage.mysql.pool.max-idle-conns`
+</ParamField>
+
+<ParamField path="storage.mysql.pool.max-open-conns" type="integer" default="100">
+  Maximum number of open connections.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_POOL_MAX_OPEN_CONNS`
+  
+  **CLI flag:** `--storage.mysql.pool.max-open-conns`
+</ParamField>
+
+<ParamField path="storage.mysql.pool.conn-max-lifetime" type="duration" default="1h">
+  Maximum lifetime of a connection.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_POOL_CONN_MAX_LIFETIME`
+  
+  **CLI flag:** `--storage.mysql.pool.conn-max-lifetime`
+</ParamField>
+
+<ParamField path="storage.mysql.pool.conn-max-idle-time" type="duration" default="10m">
+  Maximum idle time for a connection before it's closed.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MYSQL_POOL_CONN_MAX_IDLE_TIME`
+  
+  **CLI flag:** `--storage.mysql.pool.conn-max-idle-time`
+</ParamField>
+
+### Storage Features
+
+Cluster-wide defaults for log and event storage. Can be overridden per-monitor.
+
+<ParamField path="storage.log-storage-enabled" type="boolean" default="false">
+  Cluster-wide default for storing job logs in the database. Individual monitors can override this via `dataRetention.storeLogs`.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_LOG_STORAGE_ENABLED`
+  
+  **CLI flag:** `--storage.log-storage-enabled`
+</ParamField>
+
+<ParamField path="storage.event-storage-enabled" type="boolean" default="false">
+  Cluster-wide default for storing Kubernetes events in the database. Individual monitors can override via `dataRetention.storeEvents`.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_EVENT_STORAGE_ENABLED`
+  
+  **CLI flag:** `--storage.event-storage-enabled`
+</ParamField>
+
+<ParamField path="storage.max-log-size-kb" type="integer" default="100">
+  Maximum log size to store per execution in KB. Logs exceeding this size are truncated.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_MAX_LOG_SIZE_KB`
+  
+  **CLI flag:** `--storage.max-log-size-kb`
+</ParamField>
+
+<ParamField path="storage.log-retention-days" type="integer" default="0">
+  How long to keep stored logs. If `0`, uses `history-retention.default-days` value.
+  
+  **Environment variable:** `GUARDIAN_STORAGE_LOG_RETENTION_DAYS`
+  
+  **CLI flag:** `--storage.log-retention-days`
+</ParamField>
+
+## History Retention
+
+Cluster-wide defaults for execution history retention.
+
+<ParamField path="history-retention.default-days" type="integer" default="30">
+  Default retention period in days for execution history. Individual monitors can override via `dataRetention.retentionDays`.
+  
+  **Environment variable:** `GUARDIAN_HISTORY_RETENTION_DEFAULT_DAYS`
+  
+  **CLI flag:** `--history-retention.default-days`
+</ParamField>
+
+<ParamField path="history-retention.max-days" type="integer" default="90">
+  Maximum allowed retention period. Prevents monitors from retaining data indefinitely.
+  
+  **Environment variable:** `GUARDIAN_HISTORY_RETENTION_MAX_DAYS`
+  
+  **CLI flag:** `--history-retention.max-days`
+</ParamField>
+
+## Rate Limits
+
+Global rate limits to prevent alert storms.
+
+<ParamField path="rate-limits.max-alerts-per-minute" type="integer" default="50">
+  Maximum alerts per minute across all channels and monitors.
+  
+  **Environment variable:** `GUARDIAN_RATE_LIMITS_MAX_ALERTS_PER_MINUTE`
+  
+  **CLI flag:** `--rate-limits.max-alerts-per-minute`
+</ParamField>
+
+<ParamField path="rate-limits.burst-limit" type="integer" default="10">
+  Maximum burst of alerts allowed in a short window.
+  
+  **Environment variable:** `GUARDIAN_RATE_LIMITS_BURST_LIMIT`
+  
+  **CLI flag:** `--rate-limits.burst-limit`
+</ParamField>
+
+<ParamField path="rate-limits.default-suppress-duplicates-for" type="duration" default="1h">
+  Default duration to suppress duplicate alerts. Individual monitors can override via `alerting.suppressDuplicatesFor`.
+  
+  **Environment variable:** `GUARDIAN_RATE_LIMITS_DEFAULT_SUPPRESS_DUPLICATES_FOR`
+  
+  **CLI flag:** `--rate-limits.default-suppress-duplicates-for`
+</ParamField>
+
+## UI Server
+
+Configures the web UI and REST API server.
+
+<ParamField path="ui.enabled" type="boolean" default="true">
+  Enable the UI server (serves both web UI and REST API).
+  
+  **Environment variable:** `GUARDIAN_UI_ENABLED`
+  
+  **CLI flag:** `--ui.enabled`
+</ParamField>
+
+<ParamField path="ui.port" type="integer" default="8080">
+  Port for the UI server.
+  
+  **Environment variable:** `GUARDIAN_UI_PORT`
+  
+  **CLI flag:** `--ui.port`
+</ParamField>
+
+## Metrics Server
+
+Configures Prometheus metrics endpoint.
+
+<ParamField path="metrics.bind-address" type="string" default="0">
+  Address to bind the metrics endpoint. Use `"0"` to disable metrics, or `":8443"` to bind to port 8443 on all interfaces.
+  
+  **Environment variable:** `GUARDIAN_METRICS_BIND_ADDRESS`
+  
+  **CLI flag:** `--metrics.bind-address`
+</ParamField>
+
+<ParamField path="metrics.secure" type="boolean" default="true">
+  Enable HTTPS for the metrics endpoint.
+  
+  **Environment variable:** `GUARDIAN_METRICS_SECURE`
+  
+  **CLI flag:** `--metrics.secure`
+</ParamField>
+
+<ParamField path="metrics.cert-path" type="string">
+  Directory containing TLS certificates for metrics endpoint.
+  
+  **Environment variable:** `GUARDIAN_METRICS_CERT_PATH`
+  
+  **CLI flag:** `--metrics.cert-path`
+</ParamField>
+
+<ParamField path="metrics.cert-name" type="string" default="tls.crt">
+  Certificate file name within `cert-path`.
+  
+  **Environment variable:** `GUARDIAN_METRICS_CERT_NAME`
+  
+  **CLI flag:** `--metrics.cert-name`
+</ParamField>
+
+<ParamField path="metrics.cert-key" type="string" default="tls.key">
+  Private key file name within `cert-path`.
+  
+  **Environment variable:** `GUARDIAN_METRICS_CERT_KEY`
+  
+  **CLI flag:** `--metrics.cert-key`
+</ParamField>
+
+## Health Probes
+
+Configures liveness and readiness probe endpoints.
+
+<ParamField path="probes.bind-address" type="string" default=":8081">
+  Address to bind health probe endpoints (`/healthz` and `/readyz`).
+  
+  **Environment variable:** `GUARDIAN_PROBES_BIND_ADDRESS`
+  
+  **CLI flag:** `--probes.bind-address`
+</ParamField>
+
+## Leader Election
+
+Configures leader election for high-availability deployments.
+
+<ParamField path="leader-election.enabled" type="boolean" default="false">
+  Enable leader election. Required when running multiple operator replicas.
+  
+  **Environment variable:** `GUARDIAN_LEADER_ELECTION_ENABLED`
+  
+  **CLI flag:** `--leader-election.enabled`
+</ParamField>
+
+<ParamField path="leader-election.lease-duration" type="duration" default="15s">
+  Duration that non-leader candidates will wait to force acquire leadership.
+  
+  **Environment variable:** `GUARDIAN_LEADER_ELECTION_LEASE_DURATION`
+  
+  **CLI flag:** `--leader-election.lease-duration`
+</ParamField>
+
+<ParamField path="leader-election.renew-deadline" type="duration" default="10s">
+  Duration the leader will retry refreshing leadership before giving up.
+  
+  **Environment variable:** `GUARDIAN_LEADER_ELECTION_RENEW_DEADLINE`
+  
+  **CLI flag:** `--leader-election.renew-deadline`
+</ParamField>
+
+<ParamField path="leader-election.retry-period" type="duration" default="2s">
+  Duration candidates should wait between leadership acquisition attempts.
+  
+  **Environment variable:** `GUARDIAN_LEADER_ELECTION_RETRY_PERIOD`
+  
+  **CLI flag:** `--leader-election.retry-period`
+</ParamField>
+
+## Webhook Server
+
+Configures the validating/mutating webhook server.
+
+<ParamField path="webhook.cert-path" type="string">
+  Directory containing TLS certificates for the webhook server.
+  
+  **Environment variable:** `GUARDIAN_WEBHOOK_CERT_PATH`
+  
+  **CLI flag:** `--webhook.cert-path`
+</ParamField>
+
+<ParamField path="webhook.cert-name" type="string" default="tls.crt">
+  Certificate file name within `cert-path`.
+  
+  **Environment variable:** `GUARDIAN_WEBHOOK_CERT_NAME`
+  
+  **CLI flag:** `--webhook.cert-name`
+</ParamField>
+
+<ParamField path="webhook.cert-key" type="string" default="tls.key">
+  Private key file name within `cert-path`.
+  
+  **Environment variable:** `GUARDIAN_WEBHOOK_CERT_KEY`
+  
+  **CLI flag:** `--webhook.cert-key`
+</ParamField>
+
+<ParamField path="webhook.enable-http2" type="boolean" default="false">
+  Enable HTTP/2 for the webhook server. Disabled by default for security.
+  
+  **Environment variable:** `GUARDIAN_WEBHOOK_ENABLE_HTTP2`
+  
+  **CLI flag:** `--webhook.enable-http2`
+</ParamField>
+
+## Complete Example
+
+### PostgreSQL with High Availability
+
+```yaml
+log-level: info
+
+scheduler:
+  dead-man-switch-interval: 1m
+  sla-recalculation-interval: 5m
+  prune-interval: 1h
+  startup-grace-period: 30s
+
+storage:
+  type: postgres
+  postgres:
+    host: postgres.database.svc.cluster.local
+    port: 5432
+    database: cronjob_guardian
+    username: guardian
+    # Password via environment: GUARDIAN_STORAGE_POSTGRES_PASSWORD
+    ssl-mode: require
+    pool:
+      max-idle-conns: 10
+      max-open-conns: 100
+      conn-max-lifetime: 1h
+      conn-max-idle-time: 10m
+  log-storage-enabled: true
+  event-storage-enabled: true
+  max-log-size-kb: 200
+  log-retention-days: 30
+
+history-retention:
+  default-days: 30
+  max-days: 90
+
+rate-limits:
+  max-alerts-per-minute: 100
+  burst-limit: 20
+  default-suppress-duplicates-for: 1h
+
+ui:
+  enabled: true
+  port: 8080
+
+metrics:
+  bind-address: ":8443"
+  secure: true
+  cert-path: /etc/certs/metrics
+
+probes:
+  bind-address: ":8081"
+
+leader-election:
+  enabled: true
+  lease-duration: 15s
+  renew-deadline: 10s
+  retry-period: 2s
+
+webhook:
+  cert-path: /etc/certs/webhook
+  enable-http2: false
+```
+
+### Environment Variable Example
+
+```bash
+# Operator deployment with environment variables
+export GUARDIAN_LOG_LEVEL=debug
+export GUARDIAN_STORAGE_TYPE=postgres
+export GUARDIAN_STORAGE_POSTGRES_HOST=postgres.database.svc.cluster.local
+export GUARDIAN_STORAGE_POSTGRES_DATABASE=guardian
+export GUARDIAN_STORAGE_POSTGRES_USERNAME=guardian
+export GUARDIAN_STORAGE_POSTGRES_PASSWORD=secret-password
+export GUARDIAN_LEADER_ELECTION_ENABLED=true
+
+./cronjob-guardian
+```

@@ -1,0 +1,515 @@
+---
+title: "Cluster-Wide Monitoring"
+description: "Monitor CronJobs across your entire Kubernetes cluster"
+---
+
+## Overview
+
+Cluster-wide monitoring allows platform teams to maintain visibility across all CronJobs in the cluster from a single CronJobMonitor resource. This approach is ideal for:
+
+- SRE/Platform teams responsible for overall cluster health
+- Monitoring critical infrastructure jobs across all teams
+- Enforcing SLA standards organization-wide
+
+## Basic Cluster-Wide Monitor
+
+The simplest cluster-wide configuration monitors all CronJobs with a specific label.
+
+```yaml monitors/cluster-wide.yaml
+# Monitor all CronJobs cluster-wide
+# Watches all namespaces with optional label filtering
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-wide-monitor
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Watch all namespaces
+    allNamespaces: true
+    # Optionally filter by labels
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: pagerduty-critical
+        severities: [critical]
+      - name: slack-ops
+        severities: [critical, warning]
+```
+
+### What This Does
+
+- Watches **every namespace** in the cluster
+- Monitors CronJobs with the `tier: critical` label
+- Routes critical alerts to PagerDuty for on-call escalation
+- Sends all alerts to Slack for team visibility
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Verify RBAC permissions">
+    Ensure the CronJob Guardian controller has cluster-wide permissions:
+
+    ```bash
+    kubectl auth can-i list cronjobs --all-namespaces --as system:serviceaccount:cronjob-guardian:cronjob-guardian-controller-manager
+    ```
+
+    Should return `yes`. The default Helm installation configures this automatically.
+  </Step>
+
+  <Step title="Create alert channels">
+    Set up both PagerDuty and Slack alert channels:
+
+    ```bash
+    # Create PagerDuty routing key secret
+    kubectl create secret generic pagerduty-key \
+      --namespace cronjob-guardian \
+      --from-literal=routing-key=<your-routing-key>
+    
+    # Create Slack webhook secret
+    kubectl create secret generic slack-webhook \
+      --namespace cronjob-guardian \
+      --from-literal=url=https://hooks.slack.com/services/...
+    
+    # Apply alert channels
+    kubectl apply -f alertchannels/pagerduty.yaml
+    kubectl apply -f alertchannels/slack.yaml
+    ```
+  </Step>
+
+  <Step title="Apply the cluster-wide monitor">
+    ```bash
+    kubectl apply -f cluster-wide.yaml
+    ```
+  </Step>
+
+  <Step title="Verify discovery">
+    Check which jobs are being monitored:
+
+    ```bash
+    kubectl describe cronjobmonitor cluster-wide-monitor -n cronjob-guardian
+    ```
+
+    The status shows all discovered jobs:
+
+    ```yaml
+    Status:
+      Monitored Jobs:
+        - Name: database-backup
+          Namespace: production
+          Tier: critical
+        - Name: etl-pipeline
+          Namespace: data-eng
+          Tier: critical
+      Total: 15
+    ```
+  </Step>
+</Steps>
+
+## Multi-Tier Cluster Monitoring
+
+Create separate monitors for different criticality tiers with appropriate routing.
+
+<CodeGroup>
+```yaml Critical Tier
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-critical
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 99.9  # Strict SLA
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: pagerduty-oncall  # Pages on-call engineer
+        severities: [critical]
+      - name: slack-incidents
+        severities: [critical]
+```
+
+```yaml High Tier
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-high
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    matchLabels:
+      tier: high
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 95  # More lenient
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-ops  # Slack only, no pages
+        severities: [critical, warning]
+```
+
+```yaml Standard Tier
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-standard
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    matchLabels:
+      tier: standard
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 90
+    windowDays: 30  # Longer window
+  alerting:
+    channelRefs:
+      - name: slack-notifications
+        severities: [critical]  # Only critical failures
+```
+</CodeGroup>
+
+### Labeling Standard
+
+Establish a cluster-wide labeling convention:
+
+```yaml Standard CronJob Labels
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: my-job
+  namespace: my-namespace
+  labels:
+    tier: critical          # Required: critical, high, standard
+    team: platform          # Required: owning team
+    component: backups      # Required: functional component
+    monitoring: enabled     # Optional: explicit opt-in
+spec:
+  schedule: "0 2 * * *"
+  # ...
+```
+
+Document this in your organization's runbooks and enforce it via admission controllers or CI checks.
+
+## Production/Non-Production Split
+
+Monitor production and non-production environments separately with different SLA requirements.
+
+<CodeGroup>
+```yaml Production Monitor
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-cluster
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    namespaceSelector:
+      matchLabels:
+        environment: production  # Only prod namespaces
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 99
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: pagerduty-prod
+        severities: [critical]
+      - name: slack-prod-ops
+        severities: [critical, warning]
+```
+
+```yaml Non-Production Monitor
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: non-production-cluster
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    namespaceSelector:
+      matchExpressions:
+        - key: environment
+          operator: In
+          values: [staging, dev, test]
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 85  # More lenient
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-dev-ops  # No PagerDuty for non-prod
+        severities: [critical]
+```
+</CodeGroup>
+
+### Setup
+
+<Steps>
+  <Step title="Label namespaces by environment">
+    ```bash
+    kubectl label namespace production environment=production
+    kubectl label namespace staging environment=staging
+    kubectl label namespace dev environment=dev
+    ```
+  </Step>
+
+  <Step title="Apply both monitors">
+    ```bash
+    kubectl apply -f production-cluster.yaml
+    kubectl apply -f non-production-cluster.yaml
+    ```
+  </Step>
+
+  <Step title="Verify separation">
+    ```bash
+    # Check production monitor
+    kubectl describe cronjobmonitor production-cluster -n cronjob-guardian
+    
+    # Check non-production monitor
+    kubectl describe cronjobmonitor non-production-cluster -n cronjob-guardian
+    ```
+
+    Ensure each monitor only sees jobs in the appropriate namespaces.
+  </Step>
+</Steps>
+
+## Excluding System Namespaces
+
+Prevent monitoring of system CronJobs in kube-system, kube-public, etc.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: application-jobs-only
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    # Require opt-in label
+    matchLabels:
+      monitoring.guardian.illenium.net/enabled: "true"
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### Approach 1: Opt-In with Labels
+
+Only monitor CronJobs that explicitly opt in with a label:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: my-job
+  labels:
+    monitoring.guardian.illenium.net/enabled: "true"  # Explicit opt-in
+```
+
+System jobs without this label won't be monitored.
+
+### Approach 2: Namespace Label Filter
+
+Only monitor application namespaces:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: app-jobs-only
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    namespaceSelector:
+      matchLabels:
+        app-namespace: "true"  # Only namespaces with this label
+  # ...
+```
+
+Label application namespaces but not system ones:
+
+```bash
+kubectl label namespace production app-namespace=true
+kubectl label namespace staging app-namespace=true
+# kube-system remains unlabeled and is ignored
+```
+
+## Alert Routing Strategies
+
+Route alerts intelligently based on namespace, team, or component.
+
+```yaml Team-Based Routing
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-monitor
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      # Critical alerts to on-call
+      - name: pagerduty-oncall
+        severities: [critical]
+      
+      # All alerts to general ops channel
+      - name: slack-ops-general
+        severities: [critical, warning]
+      
+      # Platform team alerts
+      - name: slack-team-platform
+        severities: [critical, warning]
+        # Note: Filtering by team label requires custom alert channel logic
+```
+
+<Note>
+  Currently, AlertChannels apply to all matched jobs. For per-team routing, create separate CronJobMonitors with namespace or label selectors, or use webhook channels with custom routing logic.
+</Note>
+
+## Monitoring at Scale
+
+### Performance Considerations
+
+Cluster-wide monitoring can watch thousands of CronJobs. Consider these best practices:
+
+<AccordionGroup>
+  <Accordion title="Use Label Selectors">
+    Always filter with labels to avoid monitoring every CronJob:
+
+    ```yaml
+    # Good: Filtered
+    selector:
+      allNamespaces: true
+      matchLabels:
+        tier: critical
+    
+    # Risky: Monitors everything
+    selector:
+      allNamespaces: true
+      # No filters!
+    ```
+  </Accordion>
+
+  <Accordion title="Tune Data Retention">
+    For large-scale monitoring, reduce data retention to manage database size:
+
+    ```yaml
+    dataRetention:
+      retentionDays: 30  # Instead of default 90
+      storeLogs: false   # Don't store logs for all jobs
+      storeEvents: false # Don't store events
+    ```
+  </Accordion>
+
+  <Accordion title="Rate Limit Alerts">
+    Configure rate limiting on AlertChannels to prevent alert storms:
+
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: slack-ops
+    spec:
+      type: slack
+      rateLimiting:
+        maxAlertsPerHour: 100
+        burstLimit: 10
+    ```
+  </Accordion>
+
+  <Accordion title="Use Alert Delays">
+    Prevent alerts for transient failures:
+
+    ```yaml
+    alerting:
+      alertDelay: 5m  # Wait 5 minutes before alerting
+      suppressDuplicatesFor: 1h
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Monitoring Sharded by Team
+
+For very large clusters, create one monitor per team:
+
+```yaml Platform Team Monitor
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: team-platform
+  namespace: cronjob-guardian
+spec:
+  selector:
+    allNamespaces: true
+    matchLabels:
+      team: platform
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-team-platform
+```
+
+Repeat for each team with their own labels and alert channels. This provides:
+
+- Team-specific SLA requirements
+- Isolated alert channels per team
+- Better performance (smaller job sets per monitor)
+- Team autonomy in configuring their monitoring
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Advanced Features" icon="wand-magic-sparkles" href="/examples/advanced-monitor">
+    SLA tracking, regression detection, and maintenance windows
+  </Card>
+  <Card title="Alert Channels" icon="bell" href="/concepts/alert-channels">
+    Configure PagerDuty, Slack, and other channels
+  </Card>
+  <Card title="Data Retention" icon="database" href="/api/cronjobmonitor#data-retention">
+    Manage historical data at scale
+  </Card>
+  <Card title="RBAC Setup" icon="shield" href="/operations/security">
+    Configure cluster-wide permissions
+  </Card>
+</CardGroup>

@@ -1,0 +1,451 @@
+---
+title: SLA Configuration
+description: Configure success rate thresholds, duration tracking, and regression detection
+---
+
+Service Level Agreements (SLAs) ensure your CronJobs meet reliability and performance standards. Guardian tracks success rates, execution durations, and automatically detects performance regressions.
+
+## SLA Tracking Overview
+
+Guardian tracks these SLA metrics:
+
+- **Success Rate**: Percentage of successful runs over a rolling window
+- **Duration Metrics**: P50, P95, P99 execution times
+- **Duration Regression**: Automatic detection of performance degradation
+- **Max Duration**: Alert if jobs exceed a time threshold
+
+## Basic SLA Configuration
+
+Enable SLA tracking with default settings:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: my-monitor
+  namespace: production
+spec:
+  sla:
+    enabled: true
+    minSuccessRate: 95  # Alert if success rate drops below 95%
+    windowDays: 7       # Calculate over last 7 days
+```
+
+<Note>
+  Default values:
+  - `minSuccessRate`: 95%
+  - `windowDays`: 7 days
+</Note>
+
+## Success Rate Thresholds
+
+Set different success rate requirements based on job criticality:
+
+### Critical Backups (100% Required)
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  sla:
+    enabled: true
+    minSuccessRate: 100  # Backups must never fail
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+        severities: [critical]
+```
+
+### Production Jobs (95% Required)
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: prod-reports
+  namespace: production
+spec:
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+```
+
+### Dev/Test Jobs (Lower Threshold)
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: dev-jobs
+  namespace: development
+spec:
+  sla:
+    enabled: true
+    minSuccessRate: 80  # More lenient for dev
+    windowDays: 7
+```
+
+## Duration Tracking
+
+Guardian calculates duration percentiles (P50, P95, P99) for all monitored CronJobs.
+
+### Viewing Duration Metrics
+
+```bash
+kubectl get cronjobmonitor my-monitor -o yaml
+```
+
+Status includes duration metrics:
+
+```yaml
+status:
+  cronJobs:
+    - name: daily-report
+      namespace: production
+      metrics:
+        successRate: 98.5
+        totalRuns: 200
+        successfulRuns: 197
+        failedRuns: 3
+        avgDurationSeconds: 125.3
+        p50DurationSeconds: 120.0
+        p95DurationSeconds: 180.0
+        p99DurationSeconds: 210.0
+```
+
+### Maximum Duration Alerts
+
+Alert if any job execution exceeds a time threshold:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: fast-jobs
+  namespace: production
+spec:
+  sla:
+    enabled: true
+    maxDuration: 30m  # Alert if any run takes longer than 30 minutes
+```
+
+<Steps>
+  <Step title="Enable max duration tracking">
+    Set `maxDuration` in your monitor spec.
+  </Step>
+  
+  <Step title="Guardian monitors job durations">
+    Every job execution is timed and compared to the threshold.
+  </Step>
+  
+  <Step title="Receive alerts for slow runs">
+    If a job exceeds `maxDuration`, you'll get an alert with the actual duration and suggested fixes.
+  </Step>
+</Steps>
+
+## Duration Regression Detection
+
+Automatically detect when jobs slow down over time using baseline comparison.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: performance-sensitive
+  namespace: production
+spec:
+  sla:
+    enabled: true
+    durationRegressionThreshold: 50  # Alert if P95 increases by 50%
+    durationBaselineWindowDays: 14   # Compare to last 14 days baseline
+```
+
+### How Regression Detection Works
+
+<Steps>
+  <Step title="Baseline calculation">
+    Guardian calculates the P95 duration over the last `durationBaselineWindowDays` (e.g., 14 days).
+  </Step>
+  
+  <Step title="Current P95 comparison">
+    The current P95 (last 7 days) is compared to the baseline.
+  </Step>
+  
+  <Step title="Threshold check">
+    If the current P95 is higher than baseline by more than `durationRegressionThreshold` percent, an alert is triggered.
+  </Step>
+</Steps>
+
+### Example Regression Alert
+
+If your job's P95 goes from 2 minutes to 3.5 minutes:
+
+```
+Duration Regression Detected: production/data-pipeline
+
+Current P95: 3m30s
+Baseline P95: 2m00s
+Increase: 75% (exceeds threshold of 50%)
+
+Suggested Action:
+Investigate recent changes to the job or increased data volume.
+```
+
+### Configuring Regression Sensitivity
+
+```yaml
+sla:
+  # Conservative (less sensitive)
+  durationRegressionThreshold: 100  # Alert if P95 doubles
+  
+  # Moderate (default)
+  durationRegressionThreshold: 50   # Alert if P95 increases 50%
+  
+  # Aggressive (very sensitive)
+  durationRegressionThreshold: 25   # Alert if P95 increases 25%
+```
+
+<Warning>
+  Set `durationRegressionThreshold` based on your job's normal variance. If your job duration varies naturally (e.g., processing variable data), use a higher threshold to avoid false positives.
+</Warning>
+
+## SLA Window Configuration
+
+The `windowDays` parameter defines the rolling window for calculating success rate and duration metrics.
+
+### Short Window (3 Days)
+
+Quick detection of issues:
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 95
+  windowDays: 3  # More sensitive to recent failures
+```
+
+### Standard Window (7 Days)
+
+Balanced view:
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 95
+  windowDays: 7  # Default, recommended for most jobs
+```
+
+### Long Window (30 Days)
+
+Long-term trends:
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 90
+  windowDays: 30  # For jobs that run infrequently
+```
+
+## Complete SLA Example
+
+Here's a comprehensive configuration with all SLA features:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: data-pipeline
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      pipeline: etl
+  
+  # Dead-man's switch (separate from SLA)
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  
+  # SLA configuration
+  sla:
+    enabled: true
+    
+    # Success rate requirement
+    minSuccessRate: 95          # Alert if success rate drops below 95%
+    windowDays: 7               # Calculate over last 7 days
+    
+    # Duration limits
+    maxDuration: 30m            # Alert if any run exceeds 30 minutes
+    
+    # Regression detection
+    durationRegressionThreshold: 50    # Alert if P95 increases by 50%
+    durationBaselineWindowDays: 14     # Compare to last 14 days
+  
+  # Alerting
+  alerting:
+    channelRefs:
+      - name: slack-data-team
+        severities: [critical, warning]
+    severityOverrides:
+      slaBreached: warning
+      durationRegression: warning
+```
+
+## Viewing SLA Metrics
+
+### Via kubectl
+
+```bash
+# View monitor status with metrics
+kubectl describe cronjobmonitor data-pipeline -n production
+
+# Extract metrics as JSON
+kubectl get cronjobmonitor data-pipeline -n production -o json | jq '.status.cronJobs[].metrics'
+```
+
+### Via Dashboard
+
+The web dashboard provides:
+
+- **Success Rate Charts**: Visual trends over time
+- **Duration Heatmaps**: P50/P95/P99 over the SLA window
+- **Regression Alerts**: Highlighted when regressions are detected
+- **Historical Comparison**: Compare current vs baseline metrics
+
+Access at `http://localhost:8080` (or your configured API port).
+
+### Via API
+
+```bash
+# Get CronJob details with SLA metrics
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report
+```
+
+Response includes:
+
+```json
+{
+  "name": "daily-report",
+  "namespace": "production",
+  "metrics": {
+    "successRate7d": 98.5,
+    "totalRuns7d": 200,
+    "successfulRuns7d": 197,
+    "failedRuns7d": 3,
+    "avgDurationSeconds": 125.3,
+    "p50DurationSeconds": 120.0,
+    "p95DurationSeconds": 180.0,
+    "p99DurationSeconds": 210.0,
+    "successRate30d": 97.2
+  }
+}
+```
+
+## SLA Alerting
+
+When SLA thresholds are breached, Guardian sends alerts with:
+
+1. **Current Metrics**: Success rate, P95 duration, etc.
+2. **Threshold Details**: What threshold was breached
+3. **Historical Context**: Comparison to baseline
+4. **Suggested Actions**: Based on the type of breach
+
+### Example SLA Breach Alert
+
+```
+SLA Breached: production/daily-report
+
+Success Rate: 89.2% (threshold: 95%)
+Window: Last 7 days
+Failed Runs: 13 / 120 total
+
+Recent Failures:
+- 2024-01-15 03:00: Exit code 1 (Database connection timeout)
+- 2024-01-14 03:00: Exit code 1 (Database connection timeout)
+- 2024-01-13 03:00: Exit code 137 (OOMKilled)
+
+Suggested Action:
+Investigate database connectivity and review memory usage trends.
+```
+
+## Disabling SLA Tracking
+
+To disable SLA tracking for specific monitors:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: no-sla
+  namespace: development
+spec:
+  sla:
+    enabled: false  # Disable SLA tracking
+```
+
+Or omit the `sla` section entirely (defaults to enabled with standard thresholds).
+
+## Data Retention
+
+SLA metrics are calculated from execution history stored in the database. Configure retention:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: my-monitor
+spec:
+  dataRetention:
+    retentionDays: 60  # Keep 60 days of history for SLA calculations
+```
+
+Global retention (in `config.yaml`):
+
+```yaml
+history-retention:
+  default-days: 30
+  max-days: 90
+```
+
+<Note>
+  If your SLA window is 30 days, ensure `retentionDays` is at least 30 days (or longer for baseline calculations).
+</Note>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Match SLA to Criticality" icon="bullseye">
+    Use 100% for backups, 95% for production, 80-90% for dev/test.
+  </Card>
+  
+  <Card title="Set Realistic Duration Limits" icon="clock">
+    Base `maxDuration` on historical P99, not P50, to avoid false positives.
+  </Card>
+  
+  <Card title="Use Regression Detection" icon="chart-line">
+    Enable `durationRegressionThreshold` to catch gradual performance degradation.
+  </Card>
+  
+  <Card title="Align Windows" icon="calendar">
+    Keep `windowDays` and `durationBaselineWindowDays` proportional (e.g., 7 and 14).
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Maintenance Windows" icon="calendar" href="/guides/maintenance-windows">
+    Suppress SLA alerts during planned maintenance
+  </Card>
+  <Card title="Dashboard" icon="chart-bar" href="/guides/dashboard">
+    Visualize SLA metrics and trends
+  </Card>
+</CardGroup>

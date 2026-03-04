@@ -1,0 +1,478 @@
+---
+title: Configuring Alerts
+description: Set up alert channels, route alerts by severity, and include rich context
+---
+
+CronJob Guardian sends intelligent alerts with rich context when CronJobs fail or miss schedules. Learn how to configure alert channels and customize alerting behavior.
+
+## Alert Channels
+
+Alert channels are cluster-scoped resources that define where alerts are sent. Supported types:
+
+- **Slack**: Send to Slack channels via webhooks
+- **PagerDuty**: Create incidents for on-call escalation
+- **Email**: Send via SMTP
+- **Webhook**: Send to custom HTTP endpoints
+
+## Setting Up Slack Alerts
+
+<Steps>
+  <Step title="Create a Slack incoming webhook">
+    In Slack, go to **Apps** → **Incoming Webhooks** → **Add to Slack** and copy the webhook URL.
+  </Step>
+
+  <Step title="Create a Kubernetes secret with the webhook URL">
+    ```bash
+    kubectl create secret generic slack-webhook \
+      --namespace cronjob-guardian \
+      --from-literal=url=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+    ```
+  </Step>
+
+  <Step title="Create an AlertChannel resource">
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: slack-alerts
+    spec:
+      type: slack
+      slack:
+        webhookSecretRef:
+          name: slack-webhook
+          namespace: cronjob-guardian
+          key: url
+        defaultChannel: "#alerts"
+      rateLimiting:
+        maxAlertsPerHour: 100
+        burstLimit: 10
+    ```
+  </Step>
+
+  <Step title="Apply the AlertChannel">
+    ```bash
+    kubectl apply -f slack-channel.yaml
+    ```
+  </Step>
+
+  <Step title="Verify the channel is ready">
+    ```bash
+    kubectl get alertchannel slack-alerts
+    ```
+
+    Expected output:
+    ```
+    NAME           TYPE    READY   LAST ALERT   AGE
+    slack-alerts   slack   true                 5m
+    ```
+  </Step>
+</Steps>
+
+## Setting Up PagerDuty Alerts
+
+<Steps>
+  <Step title="Get your PagerDuty routing key">
+    In PagerDuty, go to **Services** → select your service → **Integrations** → **Events API V2** and copy the routing key.
+  </Step>
+
+  <Step title="Create a secret with the routing key">
+    ```bash
+    kubectl create secret generic pagerduty-key \
+      --namespace cronjob-guardian \
+      --from-literal=routing-key=YOUR_ROUTING_KEY
+    ```
+  </Step>
+
+  <Step title="Create a PagerDuty AlertChannel">
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: pagerduty-critical
+    spec:
+      type: pagerduty
+      pagerduty:
+        routingKeySecretRef:
+          name: pagerduty-key
+          namespace: cronjob-guardian
+          key: routing-key
+        severity: critical
+    ```
+  </Step>
+
+  <Step title="Apply the configuration">
+    ```bash
+    kubectl apply -f pagerduty-channel.yaml
+    ```
+  </Step>
+</Steps>
+
+## Setting Up Email Alerts
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-team
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: guardian@example.com
+    to:
+      - ops-team@example.com
+      - oncall@example.com
+```
+
+The `smtp-credentials` secret should contain:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: smtp-credentials
+  namespace: cronjob-guardian
+stringData:
+  host: smtp.gmail.com
+  port: "587"
+  username: your-email@gmail.com
+  password: your-app-password
+```
+
+## Setting Up Webhook Alerts
+
+Send alerts to any HTTP endpoint:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: custom-webhook
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-url
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      X-Custom-Header: guardian
+```
+
+## Routing Alerts by Severity
+
+Route different severities to different channels. For example, send critical alerts to PagerDuty and all alerts to Slack:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  alerting:
+    channelRefs:
+      - name: pagerduty-critical
+        severities: [critical]       # Only critical to PagerDuty
+      - name: slack-ops
+        severities: [critical, warning]  # All actionable alerts to Slack
+```
+
+<Note>
+  Only `critical` and `warning` severities are supported. Guardian focuses on actionable alerts, not informational noise.
+</Note>
+
+## Customizing Alert Severities
+
+Override the default severity for specific alert types:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: critical-backups
+  namespace: databases
+spec:
+  alerting:
+    severityOverrides:
+      jobFailed: critical          # Default: warning
+      slaBreached: warning         # Default: warning
+      missedSchedule: warning      # Default: warning
+      deadManTriggered: critical   # Default: critical
+      durationRegression: warning  # Default: warning
+```
+
+## Including Rich Context in Alerts
+
+Guardian can include logs, events, pod status, and suggested fixes in alerts:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: verbose-monitoring
+  namespace: production
+spec:
+  alerting:
+    includeContext:
+      logs: true                    # Include pod logs
+      logLines: 100                 # Number of log lines to include
+      logContainerName: main        # Specific container for logs
+      includeInitContainerLogs: false
+      events: true                  # Include Kubernetes events
+      podStatus: true               # Include pod status details
+      suggestedFixes: true          # Include fix suggestions
+```
+
+### Example Alert with Context
+
+When a job fails, you'll receive:
+
+```
+CronJob Failed: production/daily-report
+
+Job: daily-report-28472918
+Exit Code: 137
+Reason: OOMKilled
+
+Suggested Fix:
+Container was OOM killed. Increase memory limits:
+kubectl set resources cronjob daily-report -n production --limits=memory=2Gi
+
+Last 50 lines of logs:
+...
+Processing record 10000/50000
+fatal error: runtime: out of memory
+...
+
+Events:
+- Warning  BackOff  kubelet  Back-off restarting failed container
+- Warning  Failed   kubelet  Error: OOMKilled
+```
+
+## Suggested Fix Patterns
+
+Guardian includes built-in patterns for common failures and allows you to define custom ones.
+
+### Built-in Patterns
+
+- **OOM Killed** (exit code 137): Suggests increasing memory limits
+- **Exit code 1**: Suggests checking logs and configuration
+- **ImagePullBackOff**: Suggests checking image name and credentials
+- **CrashLoopBackOff**: Suggests reviewing logs and liveness probes
+
+### Custom Patterns
+
+Define custom fix suggestions based on logs, exit codes, or events:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  alerting:
+    suggestedFixPatterns:
+      - name: disk-full
+        match:
+          logPattern: "No space left on device|disk full"
+        suggestion: "Backup storage is full. Check PVC usage: kubectl get pvc -n {\{.Namespace}\}"
+        priority: 150  # Higher than built-in patterns (1-100)
+      
+      - name: connection-timeout
+        match:
+          logPattern: "connection timed out|ETIMEDOUT"
+        suggestion: "Network timeout detected. Check connectivity to external services."
+        priority: 50
+      
+      - name: database-locked
+        match:
+          exitCode: 5
+        suggestion: "Database lock detected. Check for concurrent backup jobs."
+        priority: 100
+```
+
+### Pattern Matching Options
+
+```yaml
+match:
+  exitCode: 137                              # Exact exit code
+  exitCodeRange:                             # Range of exit codes
+    min: 1
+    max: 10
+  reason: "OOMKilled"                        # Exact reason (case-insensitive)
+  reasonPattern: "OOM.*|.*Memory.*"          # Regex pattern for reason
+  logPattern: "fatal error|panic"            # Regex pattern in logs
+  eventPattern: "Failed.*pulling image"      # Regex pattern in events
+```
+
+## Alert Deduplication and Delays
+
+### Suppress Duplicate Alerts
+
+Prevent re-alerting for the same issue within a time window:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: my-monitor
+spec:
+  alerting:
+    suppressDuplicatesFor: 1h  # Don't re-alert for 1 hour
+```
+
+### Alert Delay (Flaky Jobs)
+
+Delay alert dispatch to allow transient issues to resolve:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: flaky-jobs
+spec:
+  alerting:
+    alertDelay: 5m  # Wait 5 minutes before sending alert
+```
+
+If the job succeeds within the delay period, the alert is cancelled and never sent.
+
+<Warning>
+  Use `alertDelay` carefully. For critical jobs like backups, you want immediate alerts, not delayed ones.
+</Warning>
+
+## Testing Alert Channels
+
+Test an alert channel to verify it's working:
+
+```bash
+kubectl run test-alert --rm -i --restart=Never --image=curlimages/curl -- \
+  curl -X POST http://cronjob-guardian-api.cronjob-guardian.svc.cluster.local:8080/api/v1/channels/slack-alerts/test
+```
+
+Or use the dashboard: Navigate to **Channels** → select your channel → **Send Test Alert**.
+
+## Rate Limiting
+
+Prevent alert storms with per-channel rate limits:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts
+spec:
+  type: slack
+  rateLimiting:
+    maxAlertsPerHour: 100  # Maximum 100 alerts per hour
+    burstLimit: 10         # Allow burst of 10 alerts per minute
+```
+
+Global rate limits (configured in `config.yaml`):
+
+```yaml
+rate-limits:
+  max-alerts-per-minute: 50
+  max-remediations-per-hour: 100
+```
+
+## Alert Types
+
+Guardian sends alerts for these events:
+
+| Type | Default Severity | Description |
+|------|-----------------|-------------|
+| `jobFailed` | warning | Job completed with failure |
+| `missedSchedule` | warning | CronJob missed its scheduled run time |
+| `deadManTriggered` | critical | No successful run within expected window |
+| `slaBreached` | warning | Success rate dropped below threshold |
+| `durationRegression` | warning | P95 duration increased significantly |
+
+## Real-World Example: Multi-Tier Alerting
+
+Here's a complete example with multiple channels and severity routing:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-jobs
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+  
+  alerting:
+    enabled: true
+    
+    # Route by severity
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]       # Pages on-call engineer
+      - name: slack-ops
+        severities: [critical, warning]  # All alerts to team Slack
+      - name: email-team
+        severities: [critical]       # Email for critical issues
+    
+    # Customize severities
+    severityOverrides:
+      jobFailed: critical
+      deadManTriggered: critical
+      slaBreached: warning
+    
+    # Include context
+    includeContext:
+      logs: true
+      logLines: 100
+      events: true
+      podStatus: true
+      suggestedFixes: true
+    
+    # Prevent alert storms
+    suppressDuplicatesFor: 1h
+    alertDelay: 2m  # Wait 2 min for transient issues
+```
+
+## Viewing Alert History
+
+View active alerts:
+
+```bash
+kubectl get cronjobmonitor my-monitor -o jsonpath='{.status.cronJobs[*].activeAlerts}' | jq
+```
+
+Or use the dashboard API:
+
+```bash
+curl http://localhost:8080/api/v1/alerts
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SLA Configuration" icon="chart-line" href="/guides/sla-configuration">
+    Configure success rate and duration thresholds
+  </Card>
+  <Card title="Maintenance Windows" icon="calendar" href="/guides/maintenance-windows">
+    Suppress alerts during planned maintenance
+  </Card>
+</CardGroup>

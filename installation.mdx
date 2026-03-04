@@ -1,0 +1,595 @@
+---
+title: Installation
+description: Complete installation guide for CronJob Guardian with all configuration options
+---
+
+## Prerequisites
+
+Before installing CronJob Guardian, ensure you have:
+
+- **Kubernetes cluster** version 1.26 or higher
+- **kubectl** configured to access your cluster
+- **Helm 3** (recommended) or kubectl for manual installation
+- **Cluster admin permissions** to create CustomResourceDefinitions and ClusterRoles
+
+<Note>
+For production deployments, review [Security](/operations/security) and [Storage](/operations/storage) configuration before installing.
+</Note>
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="Helm (Recommended)">
+    
+    ### Install with Default Settings
+    
+    ```bash
+    helm install cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+      --namespace cronjob-guardian \
+      --create-namespace
+    ```
+    
+    This installs with:
+    - SQLite storage with 1Gi persistent volume
+    - Dashboard enabled on port 8080
+    - Single replica (no leader election)
+    - Prometheus metrics enabled
+    
+    ### Install with Custom Values
+    
+    Create a `values.yaml` file:
+    
+    ```yaml values.yaml
+    replicaCount: 1
+    
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 10m
+        memory: 64Mi
+    
+    config:
+      logLevel: info
+      
+      scheduler:
+        deadManSwitchInterval: 1m
+        slaRecalculationInterval: 5m
+        pruneInterval: 1h
+        startupGracePeriod: 30s
+      
+      historyRetention:
+        defaultDays: 30
+        maxDays: 90
+      
+      rateLimits:
+        maxAlertsPerMinute: 50
+        burstLimit: 10
+        defaultSuppressDuplicatesFor: 1h
+    
+    persistence:
+      enabled: true
+      storageClass: ""
+      size: 1Gi
+    
+    ui:
+      enabled: true
+      service:
+        type: ClusterIP
+        port: 8080
+    ```
+    
+    Install with your values:
+    
+    ```bash
+    helm install cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+      --namespace cronjob-guardian \
+      --create-namespace \
+      --values values.yaml
+    ```
+    
+  </Tab>
+  
+  <Tab title="kubectl">
+    
+    ### Install CRDs
+    
+    ```bash
+    kubectl apply -f https://raw.githubusercontent.com/iLLeniumStudios/cronjob-guardian/main/config/crd/bases/guardian.illenium.net_cronjobmonitors.yaml
+    kubectl apply -f https://raw.githubusercontent.com/iLLeniumStudios/cronjob-guardian/main/config/crd/bases/guardian.illenium.net_alertchannels.yaml
+    ```
+    
+    ### Install Operator
+    
+    ```bash
+    kubectl apply -f https://raw.githubusercontent.com/iLLeniumStudios/cronjob-guardian/main/config/default/install.yaml
+    ```
+    
+    <Warning>
+    Manual installation with kubectl requires downloading and customizing the manifest files. Helm is strongly recommended for production use.
+    </Warning>
+    
+  </Tab>
+  
+  <Tab title="Kustomize">
+    
+    ### Create Kustomization
+    
+    ```yaml kustomization.yaml
+    apiVersion: kustomize.config.k8s.io/v1beta1
+    kind: Kustomization
+    
+    namespace: cronjob-guardian
+    
+    resources:
+      - https://github.com/iLLeniumStudios/cronjob-guardian/config/default?ref=v0.1.0
+    
+    patchesStrategicMerge:
+      - |-
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: cronjob-guardian
+          namespace: cronjob-guardian
+        spec:
+          template:
+            spec:
+              containers:
+                - name: manager
+                  args:
+                    - --log-level=info
+    ```
+    
+    ### Apply
+    
+    ```bash
+    kubectl apply -k .
+    ```
+    
+  </Tab>
+</Tabs>
+
+## Verify Installation
+
+Check that all components are running:
+
+```bash
+kubectl get pods -n cronjob-guardian
+```
+
+Expected output:
+
+```
+NAME                                READY   STATUS    RESTARTS   AGE
+cronjob-guardian-7d9f8c5b6d-x4k2m   1/1     Running   0          1m
+```
+
+Verify CRDs are installed:
+
+```bash
+kubectl get crd | grep guardian
+```
+
+Expected output:
+
+```
+alertchannels.guardian.illenium.net      2024-03-04T08:00:00Z
+cronjobmonitors.guardian.illenium.net    2024-03-04T08:00:00Z
+```
+
+Check operator logs:
+
+```bash
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian
+```
+
+You should see:
+
+```
+INFO    setup   initialized store       {"type": "sqlite"}
+INFO    setup   initialized SLA analyzer
+INFO    setup   initialized alert dispatcher
+INFO    setup   initialized dead-man scheduler
+INFO    setup   starting manager
+```
+
+## Configuration Options
+
+### Storage Configuration
+
+CronJob Guardian supports three storage backends:
+
+<Tabs>
+  <Tab title="SQLite (Default)">
+    
+    Best for small to medium deployments (< 100 CronJobs).
+    
+    ```yaml
+    config:
+      storage:
+        type: sqlite
+        sqlite:
+          path: /data/guardian.db
+    
+    persistence:
+      enabled: true
+      size: 1Gi
+    ```
+    
+    <Note>
+    SQLite requires a persistent volume. The operator will fail to start if persistence is disabled.
+    </Note>
+    
+  </Tab>
+  
+  <Tab title="PostgreSQL">
+    
+    Recommended for production deployments with > 100 CronJobs.
+    
+    ```yaml
+    config:
+      storage:
+        type: postgres
+        postgres:
+          host: postgres.database.svc.cluster.local
+          port: 5432
+          database: cronjob_guardian
+          username: guardian
+          existingSecret: postgres-credentials
+          existingSecretKey: password
+          sslMode: require
+          pool:
+            maxIdleConns: 10
+            maxOpenConns: 100
+            connMaxLifetime: 1h
+            connMaxIdleTime: 10m
+    
+    persistence:
+      enabled: false  # Not needed with external database
+    ```
+    
+    Create the password secret:
+    
+    ```bash
+    kubectl create secret generic postgres-credentials \
+      --namespace cronjob-guardian \
+      --from-literal=password=YOUR_PASSWORD
+    ```
+    
+  </Tab>
+  
+  <Tab title="MySQL">
+    
+    Alternative to PostgreSQL for large deployments.
+    
+    ```yaml
+    config:
+      storage:
+        type: mysql
+        mysql:
+          host: mysql.database.svc.cluster.local
+          port: 3306
+          database: cronjob_guardian
+          username: guardian
+          existingSecret: mysql-credentials
+          existingSecretKey: password
+          pool:
+            maxIdleConns: 10
+            maxOpenConns: 100
+            connMaxLifetime: 1h
+            connMaxIdleTime: 10m
+    
+    persistence:
+      enabled: false
+    ```
+    
+  </Tab>
+</Tabs>
+
+### Scheduler Configuration
+
+Control how frequently Guardian checks for issues:
+
+```yaml
+config:
+  scheduler:
+    # How often to check for dead-man's switch violations
+    deadManSwitchInterval: 1m
+    
+    # How often to recalculate SLA metrics
+    slaRecalculationInterval: 5m
+    
+    # How often to prune old execution history
+    pruneInterval: 1h
+    
+    # Wait period after startup before sending alerts
+    # (prevents alert floods on operator restart)
+    startupGracePeriod: 30s
+```
+
+### History Retention
+
+Configure how long to keep execution history:
+
+```yaml
+config:
+  historyRetention:
+    # Default retention for execution history
+    defaultDays: 30
+    
+    # Maximum retention (monitors cannot exceed this)
+    maxDays: 90
+  
+  storage:
+    # Store pod logs in database (requires more storage)
+    logStorageEnabled: false
+    
+    # Store Kubernetes events in database
+    eventStorageEnabled: false
+    
+    # Maximum log size per execution (KB)
+    maxLogSizeKB: 100
+    
+    # Log retention (0 = use defaultDays)
+    logRetentionDays: 7
+```
+
+### Rate Limiting
+
+Prevent alert floods:
+
+```yaml
+config:
+  rateLimits:
+    # Maximum alerts per minute across all channels
+    maxAlertsPerMinute: 50
+    
+    # Maximum burst of alerts allowed
+    burstLimit: 10
+    
+    # Default time to suppress duplicate alerts
+    defaultSuppressDuplicatesFor: 1h
+```
+
+### Resource Limits
+
+Adjust based on your cluster size:
+
+```yaml
+resources:
+  limits:
+    cpu: 500m        # Increase for > 200 CronJobs
+    memory: 256Mi    # Increase if storing logs
+  requests:
+    cpu: 10m
+    memory: 64Mi
+```
+
+## Exposing the Dashboard
+
+The dashboard is served on port 8080 by default. Choose an access method:
+
+<Tabs>
+  <Tab title="Port Forward">
+    
+    For local development and testing:
+    
+    ```bash
+    kubectl port-forward -n cronjob-guardian svc/cronjob-guardian 8080:8080
+    ```
+    
+    Access at [http://localhost:8080](http://localhost:8080)
+    
+  </Tab>
+  
+  <Tab title="Ingress">
+    
+    For production access with TLS:
+    
+    ```yaml
+    ui:
+      ingress:
+        enabled: true
+        className: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+        hosts:
+          - host: cronjob-guardian.example.com
+            paths:
+              - path: /
+                pathType: Prefix
+        tls:
+          - secretName: cronjob-guardian-tls
+            hosts:
+              - cronjob-guardian.example.com
+    ```
+    
+  </Tab>
+  
+  <Tab title="LoadBalancer">
+    
+    For cloud environments:
+    
+    ```yaml
+    ui:
+      service:
+        type: LoadBalancer
+        annotations:
+          service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    ```
+    
+    Get the external IP:
+    
+    ```bash
+    kubectl get svc -n cronjob-guardian cronjob-guardian
+    ```
+    
+  </Tab>
+  
+  <Tab title="NodePort">
+    
+    For bare-metal clusters:
+    
+    ```yaml
+    ui:
+      service:
+        type: NodePort
+        nodePort: 30080
+    ```
+    
+    Access at `http://<node-ip>:30080`
+    
+  </Tab>
+</Tabs>
+
+## Prometheus Metrics
+
+Enable ServiceMonitor for Prometheus Operator:
+
+```yaml
+metrics:
+  enabled: true
+  secure: true  # Use HTTPS with authentication
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    release: prometheus  # Match your Prometheus selector
+```
+
+Available metrics:
+
+- `cronjob_guardian_executions_total` - Total execution count by status
+- `cronjob_guardian_execution_duration_seconds` - Execution duration histogram
+- `cronjob_guardian_sla_success_rate` - Current success rate percentage
+- `cronjob_guardian_dead_man_switch_violations` - Dead-man's switch violations
+- `cronjob_guardian_alerts_sent_total` - Total alerts sent by channel
+
+## High Availability
+
+Run multiple replicas with leader election:
+
+```yaml
+replicaCount: 3
+
+leaderElection:
+  enabled: true
+  leaseDuration: 15s
+  renewDeadline: 10s
+  retryPeriod: 2s
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cronjob-guardian
+          topologyKey: kubernetes.io/hostname
+```
+
+<Warning>
+When using PostgreSQL or MySQL, you can run multiple replicas without leader election. With SQLite, leader election is required for multiple replicas.
+</Warning>
+
+## Upgrading
+
+To upgrade to a new version:
+
+```bash
+helm upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --values values.yaml
+```
+
+Check the [CHANGELOG](https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/CHANGELOG.md) for breaking changes.
+
+## Uninstalling
+
+<Warning>
+Uninstalling will delete all execution history and metrics. Back up your data first if needed.
+</Warning>
+
+### With Helm
+
+```bash
+helm uninstall cronjob-guardian --namespace cronjob-guardian
+```
+
+### Remove CRDs
+
+Helm does not automatically remove CRDs. Remove them manually:
+
+```bash
+kubectl delete crd cronjobmonitors.guardian.illenium.net
+kubectl delete crd alertchannels.guardian.illenium.net
+```
+
+### Remove Namespace
+
+```bash
+kubectl delete namespace cronjob-guardian
+```
+
+## Troubleshooting
+
+### Operator Won't Start
+
+Check the logs:
+
+```bash
+kubectl logs -n cronjob-guardian deployment/cronjob-guardian
+```
+
+Common issues:
+
+- **"unable to create store"**: Check storage configuration and credentials
+- **"unable to initialize store"**: Database connection failed or migrations failed
+- **"admission webhook not ready"**: CRDs may not be installed
+
+### Dashboard Not Accessible
+
+Verify the service:
+
+```bash
+kubectl get svc -n cronjob-guardian
+```
+
+Check if UI is enabled:
+
+```bash
+kubectl get deployment cronjob-guardian -n cronjob-guardian -o jsonpath='{.spec.template.spec.containers[0].args}'
+```
+
+### High Memory Usage
+
+If memory usage is high:
+
+1. Reduce history retention: `historyRetention.defaultDays`
+2. Disable log storage: `storage.logStorageEnabled: false`
+3. Reduce check intervals: `scheduler.deadManSwitchInterval`, `scheduler.slaRecalculationInterval`
+4. Increase resource limits
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Create Monitors" icon="radar" href="/guides/monitoring-cronjobs">
+    Start monitoring your CronJobs
+  </Card>
+  
+  <Card title="Configure Alerts" icon="bell" href="/guides/configuring-alerts">
+    Set up alert channels
+  </Card>
+  
+  <Card title="Storage Guide" icon="database" href="/operations/storage">
+    Learn about storage options and migration
+  </Card>
+  
+  <Card title="Security" icon="shield" href="/operations/security">
+    Secure your Guardian installation
+  </Card>
+</CardGroup>

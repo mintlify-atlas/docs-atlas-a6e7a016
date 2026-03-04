@@ -1,0 +1,370 @@
+---
+title: "Namespace Monitoring"
+description: "Monitor CronJobs across multiple namespaces or the entire cluster"
+---
+
+## Overview
+
+CronJob Guardian supports monitoring CronJobs across namespace boundaries. This is useful for:
+
+- Platform teams monitoring critical jobs across all applications
+- Multi-tenant clusters with centralized monitoring
+- Monitoring staging and production environments together
+
+## Monitor Multiple Specific Namespaces
+
+Explicitly list the namespaces you want to monitor.
+
+```yaml monitors/multi-namespace.yaml
+# Monitor CronJobs across multiple namespaces
+# Watches specific namespaces with optional label filtering
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: multi-namespace-monitor
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Watch specific namespaces
+    namespaces:
+      - production
+      - staging
+      - data-pipeline
+    # Optionally filter by labels within those namespaces
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### What This Does
+
+- Monitors CronJobs in `production`, `staging`, and `data-pipeline` namespaces
+- Only watches jobs with label `tier: critical` in those namespaces
+- The monitor itself lives in `cronjob-guardian` namespace
+- All matching jobs share the same monitoring configuration
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Ensure proper permissions">
+    The CronJob Guardian controller needs RBAC permissions to watch CronJobs across namespaces. The default installation includes cluster-wide permissions.
+
+    Verify the controller can access the namespaces:
+
+    ```bash
+    kubectl auth can-i list cronjobs --namespace production --as system:serviceaccount:cronjob-guardian:cronjob-guardian-controller-manager
+    ```
+  </Step>
+
+  <Step title="Label your CronJobs">
+    Add the `tier: critical` label to CronJobs you want monitored:
+
+    ```bash
+    kubectl label cronjob my-job tier=critical -n production
+    kubectl label cronjob another-job tier=critical -n staging
+    ```
+  </Step>
+
+  <Step title="Apply the monitor">
+    ```bash
+    kubectl apply -f multi-namespace.yaml
+    ```
+  </Step>
+
+  <Step title="Verify monitored jobs">
+    ```bash
+    kubectl describe cronjobmonitor multi-namespace-monitor -n cronjob-guardian
+    ```
+
+    Check the status for discovered jobs:
+
+    ```yaml
+    Status:
+      Monitored Jobs:
+        - Name: critical-backup
+          Namespace: production
+          Last Success: 2026-03-04T08:00:00Z
+        - Name: etl-pipeline
+          Namespace: data-pipeline
+          Last Success: 2026-03-04T07:30:00Z
+    ```
+  </Step>
+</Steps>
+
+## Monitor Namespaces by Label
+
+Dynamically discover namespaces based on their labels. This is powerful for automated environments.
+
+```yaml monitors/namespace-selector.yaml
+# Monitor CronJobs in namespaces matching labels
+# Uses namespace label selector for dynamic namespace discovery
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-jobs
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Select namespaces by their labels
+    namespaceSelector:
+      matchLabels:
+        environment: production
+    # Optionally filter CronJobs within matching namespaces
+    matchLabels:
+      monitored: "true"
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### What This Does
+
+- Discovers all namespaces with label `environment: production`
+- Within those namespaces, monitors CronJobs with label `monitored: "true"`
+- Automatically picks up new namespaces when they're created with the right label
+- Perfect for dynamic environments with auto-provisioned namespaces
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Label your namespaces">
+    Add labels to the namespaces you want monitored:
+
+    ```bash
+    kubectl label namespace production environment=production
+    kubectl label namespace prod-us-east environment=production
+    kubectl label namespace prod-eu-west environment=production
+    ```
+  </Step>
+
+  <Step title="Label CronJobs to opt-in">
+    Within those namespaces, label jobs that should be monitored:
+
+    ```bash
+    kubectl label cronjob my-job monitored="true" -n production
+    ```
+  </Step>
+
+  <Step title="Apply the monitor">
+    ```bash
+    kubectl apply -f namespace-selector.yaml
+    ```
+  </Step>
+
+  <Step title="Test auto-discovery">
+    Create a new namespace with the label and verify it's picked up:
+
+    ```bash
+    kubectl create namespace prod-ap-south
+    kubectl label namespace prod-ap-south environment=production
+    
+    # Check if the monitor found it
+    kubectl describe cronjobmonitor production-jobs -n cronjob-guardian
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  Use `namespaceSelector` with GitOps workflows. When your IaC tool creates new namespaces with the right labels, they're automatically monitored without updating the CronJobMonitor.
+</Tip>
+
+## Cluster-Wide Monitoring
+
+For platform teams, monitor all CronJobs across the entire cluster.
+
+```yaml monitors/cluster-wide.yaml
+# Monitor all CronJobs cluster-wide
+# Watches all namespaces with optional label filtering
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cluster-wide-monitor
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Watch all namespaces
+    allNamespaces: true
+    # Optionally filter by labels
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: pagerduty-critical
+        severities: [critical]
+      - name: slack-ops
+        severities: [critical, warning]
+```
+
+### What This Does
+
+- Monitors every CronJob in every namespace (if they have `tier: critical` label)
+- Sends critical alerts to PagerDuty for on-call escalation
+- Sends all alerts to Slack for visibility
+- Provides a single pane of glass for all critical jobs
+
+### When to Use This
+
+- Platform/SRE teams responsible for all infrastructure
+- Small to medium clusters where monitoring everything is manageable
+- When you have a clear labeling standard (e.g., `tier: critical`)
+
+<Warning>
+  Be careful with cluster-wide monitors:
+  
+  - Without label filters, you'll monitor **every CronJob** including test jobs
+  - Can generate high alert volume if many jobs exist
+  - Requires good labeling discipline across teams
+  
+  Always use `matchLabels` or `matchExpressions` to filter appropriately.
+</Warning>
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Establish labeling standards">
+    Document and enforce a labeling convention across teams:
+
+    ```yaml
+    # teams/labeling-standards.md
+    All critical CronJobs MUST have:
+    - tier: critical
+    - team: <team-name>
+    - component: <component-name>
+    ```
+  </Step>
+
+  <Step title="Create separate alert channels">
+    Use different channels for different severity levels:
+
+    ```bash
+    kubectl apply -f alertchannels/pagerduty.yaml  # For critical
+    kubectl apply -f alertchannels/slack.yaml      # For all alerts
+    ```
+  </Step>
+
+  <Step title="Apply the cluster-wide monitor">
+    ```bash
+    kubectl apply -f cluster-wide.yaml
+    ```
+  </Step>
+
+  <Step title="Monitor alert volume">
+    Watch for alert fatigue:
+
+    ```bash
+    # Check how many jobs are being monitored
+    kubectl get cronjobmonitor cluster-wide-monitor -n cronjob-guardian -o jsonpath='{.status.monitoredJobs}'
+    
+    # Review alerts in your Slack/PagerDuty to ensure signal-to-noise ratio is good
+    ```
+  </Step>
+</Steps>
+
+## Comparison of Approaches
+
+<AccordionGroup>
+  <Accordion title="Explicit Namespaces vs. Namespace Selector">
+    **Explicit Namespaces** (`namespaces: [prod, staging]`):
+    - Simple and explicit
+    - Requires updating the monitor when adding namespaces
+    - Best for static environments with few namespaces
+
+    **Namespace Selector** (`namespaceSelector`):
+    - Dynamic and automated
+    - New namespaces automatically picked up
+    - Best for dynamic environments (multi-tenant, auto-scaling)
+  </Accordion>
+
+  <Accordion title="Multi-Namespace vs. Multiple Single-Namespace Monitors">
+    **Single Multi-Namespace Monitor**:
+    - One configuration for all namespaces
+    - Same SLA and alert rules everywhere
+    - Simpler to manage at scale
+
+    **Multiple Single-Namespace Monitors**:
+    - Different SLA/alert rules per namespace
+    - More granular control
+    - More YAML to maintain
+
+    Choose based on whether your requirements vary by namespace.
+  </Accordion>
+
+  <Accordion title="Cluster-Wide vs. Targeted Monitoring">
+    **Cluster-Wide**:
+    - One monitor to rule them all
+    - Simple for small/medium clusters
+    - Risk of alert fatigue
+
+    **Targeted** (specific namespaces/labels):
+    - More control and less noise
+    - Better for large clusters
+    - Requires more planning
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Filtering Techniques
+
+Combine multiple selector types for precise control:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: advanced-selector
+  namespace: cronjob-guardian
+spec:
+  selector:
+    # Watch production namespaces
+    namespaceSelector:
+      matchLabels:
+        environment: production
+    # Only critical or high tier jobs
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [critical, high]
+    # Exclude anything marked as disabled
+    matchExpressions:
+      - key: monitoring
+        operator: DoesNotExist
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+This monitors:
+1. Only namespaces with `environment: production`
+2. Only jobs with `tier: critical` or `tier: high`
+3. Excludes jobs with a `monitoring` label (opt-out mechanism)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Cluster-Wide Examples" icon="globe" href="/examples/cluster-monitor">
+    More cluster-wide monitoring patterns
+  </Card>
+  <Card title="Advanced Features" icon="wand-magic-sparkles" href="/examples/advanced-monitor">
+    SLA tracking and regression detection
+  </Card>
+  <Card title="Alert Routing" icon="route" href="/concepts/alert-channels">
+    Route alerts to different channels by severity
+  </Card>
+  <Card title="RBAC Configuration" icon="shield" href="/operations/security">
+    Set up permissions for cross-namespace monitoring
+  </Card>
+</CardGroup>

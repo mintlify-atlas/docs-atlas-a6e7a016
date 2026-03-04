@@ -1,0 +1,564 @@
+---
+title: Upgrading
+description: How to upgrade the CronJob Guardian operator to newer versions
+---
+
+## Overview
+
+This guide covers upgrading CronJob Guardian to newer versions, including operator upgrades, database migrations, and handling breaking changes.
+
+## Version Compatibility
+
+CronJob Guardian follows [Semantic Versioning](https://semver.org/):
+
+- **Major versions (1.0.0 → 2.0.0):** Breaking changes, may require manual intervention
+- **Minor versions (0.1.0 → 0.2.0):** New features, backward compatible
+- **Patch versions (0.1.0 → 0.1.1):** Bug fixes, backward compatible
+
+**Current version:** 0.1.1 (as of March 2026)
+
+### Kubernetes Version Support
+
+Minimum Kubernetes version: **1.25+**
+
+Tested on:
+- Kubernetes 1.25, 1.26, 1.27, 1.28, 1.29
+- OpenShift 4.12+
+
+## Upgrade Methods
+
+### Helm Upgrade (Recommended)
+
+Helm handles upgrade orchestration automatically.
+
+#### Check Current Version
+
+```bash
+# List installed releases
+helm list -n cronjob-guardian
+
+# Check operator version
+kubectl get deployment cronjob-guardian -n cronjob-guardian -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+#### Upgrade to Latest Version
+
+```bash
+# Update Helm repository
+helm repo update
+
+# Check available versions
+helm search repo cronjob-guardian --versions
+
+# Upgrade to latest
+helm upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --reuse-values
+```
+
+**Flags:**
+- `--reuse-values` - Keep existing configuration
+- `--reset-values` - Reset to chart defaults (use with caution)
+- `--version X.Y.Z` - Upgrade to specific version
+
+#### Upgrade to Specific Version
+
+```bash
+helm upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --version 0.1.1 \
+  --reuse-values
+```
+
+#### Review Changes Before Upgrade
+
+```bash
+# Dry-run to preview changes
+helm upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --reuse-values \
+  --dry-run
+
+# Show diff (requires helm-diff plugin)
+helm diff upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --reuse-values
+```
+
+### Manual Upgrade (kubectl)
+
+For deployments not using Helm:
+
+```bash
+# Update CRDs first
+kubectl apply -f https://github.com/iLLeniumStudios/cronjob-guardian/releases/download/v0.1.1/crds.yaml
+
+# Update operator deployment
+kubectl set image deployment/cronjob-guardian \
+  manager=ghcr.io/illeniumstudios/cronjob-guardian:v0.1.1 \
+  -n cronjob-guardian
+
+# Wait for rollout
+kubectl rollout status deployment/cronjob-guardian -n cronjob-guardian
+```
+
+## Upgrade Process
+
+### Pre-Upgrade Checklist
+
+Before upgrading, complete these steps:
+
+1. **Review release notes**
+   ```bash
+   # View changelog
+   curl -sL https://github.com/iLLeniumStudios/cronjob-guardian/releases/latest | grep -A 50 "Release Notes"
+   ```
+
+2. **Backup database**
+   ```bash
+   # PostgreSQL backup
+   pg_dump -h postgres.example.com -U guardian -d guardian -F c -f guardian-backup-$(date +%Y%m%d).dump
+   
+   # SQLite backup (from pod)
+   kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+     sqlite3 /data/guardian.db ".backup /data/backup-$(date +%Y%m%d).db"
+   ```
+
+3. **Backup Custom Resources**
+   ```bash
+   # Export all CronJobMonitors
+   kubectl get cronjobmonitors -A -o yaml > cronjobmonitors-backup.yaml
+   
+   # Export all AlertChannels
+   kubectl get alertchannels -A -o yaml > alertchannels-backup.yaml
+   ```
+
+4. **Check resource health**
+   ```bash
+   kubectl get cronjobmonitors -A
+   kubectl get alertchannels -A
+   kubectl logs -n cronjob-guardian deploy/cronjob-guardian --tail=100
+   ```
+
+5. **Review breaking changes**
+   - Check release notes for breaking changes
+   - Review migration steps if any
+   - Plan maintenance window if needed
+
+### Performing the Upgrade
+
+#### Standard Upgrade (No Breaking Changes)
+
+```bash
+# 1. Update CRDs (Helm does this automatically)
+kubectl apply -f https://github.com/iLLeniumStudios/cronjob-guardian/releases/download/v0.1.1/crds.yaml
+
+# 2. Upgrade Helm release
+helm upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --version 0.1.1 \
+  --reuse-values
+
+# 3. Wait for rollout
+kubectl rollout status deployment/cronjob-guardian -n cronjob-guardian
+
+# 4. Verify health
+kubectl get pods -n cronjob-guardian
+kubectl logs -n cronjob-guardian deploy/cronjob-guardian --tail=50
+```
+
+#### Upgrade with Configuration Changes
+
+```bash
+# 1. Update values.yaml with new settings
+cat > values-upgrade.yaml <<EOF
+config:
+  scheduler:
+    startupGracePeriod: 60s  # New setting
+  storage:
+    logRetentionDays: 7  # New setting
+EOF
+
+# 2. Upgrade with new values
+helm upgrade cronjob-guardian oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+  --namespace cronjob-guardian \
+  --version 0.1.1 \
+  --values values-upgrade.yaml \
+  --reuse-values
+```
+
+### Post-Upgrade Verification
+
+```bash
+# 1. Check pod status
+kubectl get pods -n cronjob-guardian
+
+# 2. Verify version
+kubectl get deployment cronjob-guardian -n cronjob-guardian \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+# 3. Check logs for errors
+kubectl logs -n cronjob-guardian deploy/cronjob-guardian --tail=100
+
+# 4. Verify CRDs are healthy
+kubectl get cronjobmonitors -A
+kubectl get alertchannels -A
+
+# 5. Test metrics endpoint
+kubectl port-forward -n cronjob-guardian deploy/cronjob-guardian 8443:8443
+curl -k https://localhost:8443/metrics
+
+# 6. Access UI
+kubectl port-forward -n cronjob-guardian deploy/cronjob-guardian 8080:8080
+# Open http://localhost:8080 in browser
+
+# 7. Verify alerts are working
+# Trigger a test alert by failing a monitored job
+```
+
+## Database Migrations
+
+CronJob Guardian uses GORM auto-migration. Database schema is automatically updated on operator startup.
+
+### Migration Process
+
+**Automatic migration:**
+1. Operator starts up
+2. Connects to database
+3. GORM analyzes current schema
+4. Creates/modifies tables and columns as needed
+5. Existing data is preserved
+
+**Logged as:**
+```
+initialized store type="postgres"
+```
+
+### Manual Migration (Emergency)
+
+If auto-migration fails:
+
+```bash
+# 1. Get migration SQL (requires database access)
+kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+  /manager --config=/etc/cronjob-guardian/config.yaml --dry-run-migration
+
+# 2. Review SQL statements
+# 3. Apply manually to database
+psql -h postgres.example.com -U guardian -d guardian < migration.sql
+```
+
+**Note:** `--dry-run-migration` flag is planned for future release.
+
+## CRD Upgrades
+
+Custom Resource Definitions are versioned separately from the operator.
+
+### Checking CRD Versions
+
+```bash
+# Check installed CRD versions
+kubectl get crd cronjobmonitors.guardian.illenium.net -o jsonpath='{.spec.versions[*].name}'
+kubectl get crd alertchannels.guardian.illenium.net -o jsonpath='{.spec.versions[*].name}'
+```
+
+### Updating CRDs
+
+**Helm automatically updates CRDs** (if configured):
+
+```yaml
+# Chart.yaml annotation
+annotations:
+  "helm.sh/resource-policy": keep
+```
+
+**Manual CRD update:**
+
+```bash
+# Apply latest CRDs
+kubectl apply -f https://github.com/iLLeniumStudios/cronjob-guardian/releases/download/v0.1.1/crds.yaml
+```
+
+### API Version Migration
+
+When a new CRD version is introduced (e.g., `v1alpha1` → `v1beta1`):
+
+1. Both versions are supported during transition period
+2. Conversion webhook handles automatic conversion
+3. Update resources to new version:
+
+```bash
+# Export resources in new version
+kubectl get cronjobmonitors -A -o yaml | \
+  sed 's/v1alpha1/v1beta1/' | \
+  kubectl apply -f -
+```
+
+## Rollback
+
+If upgrade fails, rollback to previous version.
+
+### Helm Rollback
+
+```bash
+# List release history
+helm history cronjob-guardian -n cronjob-guardian
+
+# Rollback to previous version
+helm rollback cronjob-guardian -n cronjob-guardian
+
+# Rollback to specific revision
+helm rollback cronjob-guardian 3 -n cronjob-guardian
+```
+
+### Manual Rollback
+
+```bash
+# Rollback to previous image
+kubectl set image deployment/cronjob-guardian \
+  manager=ghcr.io/illeniumstudios/cronjob-guardian:v0.1.0 \
+  -n cronjob-guardian
+
+# Wait for rollout
+kubectl rollout status deployment/cronjob-guardian -n cronjob-guardian
+```
+
+### Database Rollback
+
+If database migration fails:
+
+```bash
+# Restore from backup
+pg_restore -h postgres.example.com -U guardian -d guardian \
+  --clean \
+  guardian-backup-20260304.dump
+```
+
+**Warning:** Rolling back database may cause data loss for records created after backup.
+
+## Breaking Changes by Version
+
+### v0.1.0 (Initial Release)
+
+No breaking changes (initial release).
+
+### v0.1.1 (Current)
+
+No breaking changes from v0.1.0.
+
+**Changes:**
+- Bug fixes for UI chart styling
+- Changelog generation improvements
+- No configuration changes required
+
+### Future Versions
+
+Breaking changes will be documented here as they occur.
+
+## High Availability Upgrades
+
+When running multiple replicas with leader election:
+
+### Rolling Update Strategy
+
+Helm uses RollingUpdate by default:
+
+```yaml
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+```
+
+**Upgrade process:**
+1. New pod is created with updated version
+2. New pod becomes ready
+3. Old pod is terminated
+4. Repeat for remaining pods
+
+**Downtime:** None (if >1 replica)
+
+**Leader election:** Leadership transfers automatically during rollout.
+
+### Blue-Green Upgrade
+
+For maximum safety:
+
+```bash
+# 1. Create new deployment with updated version
+kubectl create deployment cronjob-guardian-v2 \
+  --image=ghcr.io/illeniumstudios/cronjob-guardian:v0.1.1 \
+  -n cronjob-guardian
+
+# 2. Configure with same database (separate namespace recommended)
+# 3. Test thoroughly
+# 4. Switch over by updating service selector
+kubectl patch service cronjob-guardian -n cronjob-guardian \
+  -p '{"spec":{"selector":{"version":"v0.1.1"}}}'
+
+# 5. Delete old deployment after verification
+kubectl delete deployment cronjob-guardian -n cronjob-guardian
+```
+
+## Troubleshooting Upgrades
+
+### Upgrade Stuck or Failing
+
+**Check pod status:**
+
+```bash
+kubectl get pods -n cronjob-guardian
+kubectl describe pod <pod-name> -n cronjob-guardian
+kubectl logs -n cronjob-guardian <pod-name> --previous
+```
+
+**Common issues:**
+
+1. **Image pull errors**
+   ```bash
+   # Check image exists
+   docker pull ghcr.io/illeniumstudios/cronjob-guardian:v0.1.1
+   
+   # Check imagePullSecrets if using private registry
+   kubectl get secret -n cronjob-guardian
+   ```
+
+2. **CRD conflicts**
+   ```bash
+   # Re-apply CRDs
+   kubectl apply -f https://github.com/iLLeniumStudios/cronjob-guardian/releases/download/v0.1.1/crds.yaml
+   ```
+
+3. **Database migration failures**
+   ```bash
+   # Check database connectivity
+   kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+     nc -zv postgres.example.com 5432
+   
+   # Check logs for migration errors
+   kubectl logs -n cronjob-guardian deploy/cronjob-guardian | grep -i migration
+   ```
+
+4. **Resource limits**
+   ```bash
+   # Check resource usage
+   kubectl top pods -n cronjob-guardian
+   
+   # Increase limits if needed
+   helm upgrade cronjob-guardian ... \
+     --set resources.limits.memory=512Mi
+   ```
+
+### Rollback Not Working
+
+```bash
+# Force delete stuck pods
+kubectl delete pod <pod-name> -n cronjob-guardian --grace-period=0 --force
+
+# Scale to 0 and back
+kubectl scale deployment cronjob-guardian --replicas=0 -n cronjob-guardian
+kubectl scale deployment cronjob-guardian --replicas=1 -n cronjob-guardian
+```
+
+### CRD Validation Errors
+
+```bash
+# Check CRD validation
+kubectl get crd cronjobmonitors.guardian.illenium.net -o yaml
+
+# Validate existing resources
+kubectl get cronjobmonitors -A --show-managed-fields=false
+
+# Fix invalid resources
+kubectl edit cronjobmonitor <name> -n <namespace>
+```
+
+## Best Practices
+
+### Planning
+
+1. **Read release notes** - Always review before upgrading
+2. **Test in staging** - Upgrade non-production first
+3. **Schedule maintenance** - Plan for breaking changes
+4. **Backup everything** - Database, CRs, configuration
+5. **Document changes** - Track what was changed
+
+### Execution
+
+1. **Upgrade during low-traffic** - Minimize impact
+2. **Monitor during upgrade** - Watch logs and metrics
+3. **Verify thoroughly** - Test all features post-upgrade
+4. **Keep rollback ready** - Know how to rollback quickly
+5. **Update documentation** - Document new configuration
+
+### Automation
+
+**GitOps with ArgoCD:**
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cronjob-guardian
+spec:
+  source:
+    repoURL: ghcr.io/illeniumstudios/charts
+    chart: cronjob-guardian
+    targetRevision: 0.1.1
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+```
+
+**FluxCD:**
+
+```yaml
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: cronjob-guardian
+spec:
+  chart:
+    spec:
+      chart: cronjob-guardian
+      sourceRef:
+        kind: HelmRepository
+        name: illenium
+      version: '>=0.1.0 under 1.0.0'  # Auto-upgrade minor/patch
+  upgrade:
+    remediation:
+      retries: 3
+```
+
+## Version History
+
+### v0.1.1 (2026-01-02)
+
+**Changes:**
+- Bug fixes for UI chart icon wrapper styles
+- Improved changelog generation for chart versions
+- Documentation updates
+
+**Upgrade notes:** No breaking changes. Safe to upgrade directly from v0.1.0.
+
+### v0.1.0 (2026-01-02)
+
+**Initial release:**
+- CronJob monitoring with dead-man's switch
+- SLA tracking with duration percentiles
+- Alert channels (Slack, PagerDuty, Email, Webhook)
+- Web UI with dashboard
+- Prometheus metrics
+- SQLite, PostgreSQL, MySQL support
+
+## Getting Help
+
+**Documentation:** https://illeniumstudios.github.io/cronjob-guardian/
+
+**GitHub Issues:** https://github.com/iLLeniumStudios/cronjob-guardian/issues
+
+**Discussions:** https://github.com/iLLeniumStudios/cronjob-guardian/discussions
+
+**Release Notes:** https://github.com/iLLeniumStudios/cronjob-guardian/releases

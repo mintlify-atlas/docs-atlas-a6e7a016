@@ -1,0 +1,527 @@
+---
+title: Using the Dashboard
+description: Navigate the web dashboard to monitor CronJobs, view metrics, and manage alerts
+---
+
+CronJob Guardian includes a built-in web dashboard for visualizing CronJob health, metrics, and alerts. Access it at `http://localhost:8080` (or your configured API port).
+
+## Accessing the Dashboard
+
+<Steps>
+  <Step title="Port-forward the API service (for local access)">
+    ```bash
+    kubectl port-forward -n cronjob-guardian svc/cronjob-guardian-api 8080:8080
+    ```
+  </Step>
+  
+  <Step title="Open in your browser">
+    Navigate to `http://localhost:8080`
+  </Step>
+  
+  <Step title="Explore the dashboard">
+    The dashboard automatically connects to the Guardian API running in your cluster.
+  </Step>
+</Steps>
+
+<Note>
+  For production deployments, expose the dashboard via an Ingress or LoadBalancer. See the production setup guide for details.
+</Note>
+
+## Dashboard Overview
+
+The dashboard provides several key views:
+
+### Home / Statistics
+
+The home page shows cluster-wide statistics:
+
+- **Total Monitors**: Number of active CronJobMonitor resources
+- **Total CronJobs**: Number of monitored CronJobs
+- **Health Summary**: Breakdown by status (healthy, warning, critical, suspended)
+- **Active Alerts**: Current open alerts across all monitors
+- **Executions (24h)**: Number of job executions recorded in the last 24 hours
+
+**API Endpoint**: `GET /api/v1/stats`
+
+```bash
+curl http://localhost:8080/api/v1/stats
+```
+
+Response:
+
+```json
+{
+  "totalMonitors": 5,
+  "totalCronJobs": 42,
+  "summary": {
+    "healthy": 38,
+    "warning": 3,
+    "critical": 1,
+    "suspended": 2,
+    "running": 0
+  },
+  "activeAlerts": 4,
+  "executionsRecorded24h": 1247
+}
+```
+
+## Monitors View
+
+Lists all CronJobMonitor resources with their status.
+
+**API Endpoint**: `GET /api/v1/monitors`
+
+```bash
+curl http://localhost:8080/api/v1/monitors
+```
+
+### Monitor Details
+
+Click on a monitor to view:
+
+- **Configuration**: Selector, dead-man's switch, SLA settings, alert channels
+- **Monitored CronJobs**: List of discovered CronJobs
+- **Status Summary**: Healthy, warning, critical counts
+- **Recent Activity**: Latest reconciliation time
+
+**API Endpoint**: `GET /api/v1/monitors/{namespace}/{name}`
+
+```bash
+curl http://localhost:8080/api/v1/monitors/production/critical-jobs
+```
+
+## CronJobs View
+
+Lists all monitored CronJobs with real-time status.
+
+**Features**:
+- **Search**: Filter by CronJob name
+- **Filter by Status**: Show only healthy, warning, or critical jobs
+- **Filter by Namespace**: Narrow down to specific namespaces
+- **Sort**: By name, namespace, success rate, or last run
+
+**API Endpoint**: `GET /api/v1/cronjobs`
+
+```bash
+# All CronJobs
+curl http://localhost:8080/api/v1/cronjobs
+
+# Filter by namespace
+curl http://localhost:8080/api/v1/cronjobs?namespace=production
+
+# Filter by status
+curl http://localhost:8080/api/v1/cronjobs?status=critical
+
+# Search
+curl http://localhost:8080/api/v1/cronjobs?search=backup
+```
+
+### CronJob Details Page
+
+Click on a CronJob to view detailed information:
+
+#### Overview Section
+
+- **Name & Namespace**: CronJob identification
+- **Schedule**: Cron expression and timezone
+- **Status**: Current health (healthy, warning, critical, suspended)
+- **Monitor**: Link to the CronJobMonitor watching this job
+- **Next Run**: Scheduled next execution time
+- **Last Success**: Timestamp of last successful run
+
+#### Metrics Section
+
+- **Success Rate**: 7-day and 30-day success rates
+- **Total Runs**: Count over the SLA window
+- **Duration Statistics**: Average, P50, P95, P99
+- **Visual Charts**: Success rate trends, duration heatmaps
+
+#### Active Jobs Section
+
+Currently running job instances:
+
+- **Job Name**: Kubernetes Job resource name
+- **Start Time**: When the job started
+- **Running Duration**: How long it's been running
+- **Pod Phase**: Pending, Running, etc.
+- **Pod Name**: Link to pod details
+
+#### Active Alerts Section
+
+Current alerts for this CronJob:
+
+- **Alert Type**: jobFailed, deadManTriggered, slaBreached, etc.
+- **Severity**: Critical or warning
+- **Message**: Alert description
+- **Since**: When the alert started
+- **Context**: Exit code, reason, suggested fix (if available)
+
+#### Execution History Section
+
+Paginated list of past executions (last 30 days by default):
+
+- **Job Name**: Kubernetes Job resource
+- **Status**: Success or failed
+- **Start Time**: When the job started
+- **Duration**: How long the job ran
+- **Exit Code**: Container exit code (for failures)
+- **Actions**: View logs, view details
+
+**API Endpoint**: `GET /api/v1/cronjobs/{namespace}/{name}`
+
+```bash
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report
+```
+
+## Execution History
+
+View detailed execution history for a specific CronJob.
+
+**API Endpoint**: `GET /api/v1/cronjobs/{namespace}/{name}/executions`
+
+```bash
+# Default (last 30 days, 20 per page)
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report/executions
+
+# Pagination
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report/executions?limit=50&offset=0
+
+# Filter by status
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report/executions?status=failed
+
+# Filter by time
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report/executions?since=2024-01-01T00:00:00Z
+```
+
+### Execution Details
+
+Click on an execution to view:
+
+- **Full Execution Details**: Start time, completion time, duration, exit code, reason
+- **Stored Logs**: Container logs (if log storage is enabled)
+- **Stored Events**: Kubernetes events (if event storage is enabled)
+- **Retry Information**: If this execution is a retry, links to the original job
+
+**API Endpoint**: `GET /api/v1/cronjobs/{namespace}/{name}/executions/{jobName}`
+
+```bash
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report/executions/daily-report-28472918
+```
+
+## Viewing Logs
+
+View container logs for a specific job execution.
+
+**API Endpoint**: `GET /api/v1/cronjobs/{namespace}/{name}/executions/{jobName}/logs`
+
+```bash
+# Default (last 500 lines)
+curl http://localhost:8080/api/v1/cronjobs/production/daily-report/executions/daily-report-28472918/logs
+
+# Specify container
+curl "http://localhost:8080/api/v1/cronjobs/production/daily-report/executions/daily-report-28472918/logs?container=main"
+
+# Tail more lines
+curl "http://localhost:8080/api/v1/cronjobs/production/daily-report/executions/daily-report-28472918/logs?tailLines=1000"
+```
+
+## Alerts View
+
+View all active alerts across all monitored CronJobs.
+
+**Features**:
+- **Filter by Severity**: Critical or warning
+- **Filter by Type**: jobFailed, deadManTriggered, slaBreached, etc.
+- **Filter by Namespace or CronJob**: Narrow down to specific resources
+- **Sort**: By severity, time, or CronJob name
+
+**API Endpoint**: `GET /api/v1/alerts`
+
+```bash
+# All active alerts
+curl http://localhost:8080/api/v1/alerts
+
+# Filter by severity
+curl http://localhost:8080/api/v1/alerts?severity=critical
+
+# Filter by type
+curl http://localhost:8080/api/v1/alerts?type=jobFailed
+
+# Filter by CronJob
+curl http://localhost:8080/api/v1/alerts?namespace=production&cronjob=daily-report
+```
+
+### Alert History
+
+View historical alerts (resolved or expired).
+
+**API Endpoint**: `GET /api/v1/alerts/history`
+
+```bash
+# Default (last 50 alerts)
+curl http://localhost:8080/api/v1/alerts/history
+
+# Pagination
+curl http://localhost:8080/api/v1/alerts/history?limit=100&offset=0
+
+# Filter by severity
+curl http://localhost:8080/api/v1/alerts/history?severity=critical
+
+# Filter by time
+curl http://localhost:8080/api/v1/alerts/history?since=2024-01-01T00:00:00Z
+```
+
+## Alert Channels View
+
+Manage and monitor alert channels (Slack, PagerDuty, email, webhooks).
+
+**Features**:
+- **Channel Status**: Ready or not ready
+- **Statistics**: Total alerts sent, failed alerts, consecutive failures
+- **Last Alert Time**: When the last alert was successfully sent
+- **Test Alerts**: Send a test alert to verify channel configuration
+
+**API Endpoint**: `GET /api/v1/channels`
+
+```bash
+curl http://localhost:8080/api/v1/channels
+```
+
+### Channel Details
+
+View detailed information about a specific channel:
+
+- **Type**: Slack, PagerDuty, email, webhook
+- **Configuration**: Redacted sensitive values
+- **Test Results**: Last test time and result
+- **Statistics**: Detailed send/failure stats
+
+**API Endpoint**: `GET /api/v1/channels/{name}`
+
+```bash
+curl http://localhost:8080/api/v1/channels/slack-alerts
+```
+
+### Testing a Channel
+
+Send a test alert to verify the channel is working:
+
+**API Endpoint**: `POST /api/v1/channels/{name}/test`
+
+```bash
+curl -X POST http://localhost:8080/api/v1/channels/slack-alerts/test
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Test alert sent successfully"
+}
+```
+
+## Actions on CronJobs
+
+The dashboard allows you to perform actions on CronJobs:
+
+### Trigger a CronJob Manually
+
+Create a Job manually (useful for testing):
+
+**API Endpoint**: `POST /api/v1/cronjobs/{namespace}/{name}/trigger`
+
+```bash
+curl -X POST http://localhost:8080/api/v1/cronjobs/production/daily-report/trigger
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "jobName": "daily-report-manual-1705432890",
+  "message": "Job created successfully"
+}
+```
+
+### Suspend a CronJob
+
+Prevent scheduled runs:
+
+**API Endpoint**: `POST /api/v1/cronjobs/{namespace}/{name}/suspend`
+
+```bash
+curl -X POST http://localhost:8080/api/v1/cronjobs/production/daily-report/suspend
+```
+
+### Resume a CronJob
+
+Resume scheduled runs:
+
+**API Endpoint**: `POST /api/v1/cronjobs/{namespace}/{name}/resume`
+
+```bash
+curl -X POST http://localhost:8080/api/v1/cronjobs/production/daily-report/resume
+```
+
+## Health Check
+
+Check the health and status of the Guardian operator:
+
+**API Endpoint**: `GET /api/v1/health`
+
+```bash
+curl http://localhost:8080/api/v1/health
+```
+
+Response:
+
+```json
+{
+  "status": "healthy",
+  "storage": "connected",
+  "leader": true,
+  "version": "v0.5.0",
+  "uptime": "5h30m15s",
+  "analyzerEnabled": true,
+  "schedulersRunning": [
+    "dead-man-switch",
+    "sla-recalculation",
+    "stuck-job-check",
+    "prune"
+  ]
+}
+```
+
+## Configuration View
+
+View the operator's current configuration (sensitive values redacted):
+
+**API Endpoint**: `GET /api/v1/config`
+
+```bash
+curl http://localhost:8080/api/v1/config
+```
+
+## Admin Actions
+
+### Storage Statistics
+
+View storage backend health and statistics:
+
+**API Endpoint**: `GET /api/v1/admin/storage-stats`
+
+```bash
+curl http://localhost:8080/api/v1/admin/storage-stats
+```
+
+Response:
+
+```json
+{
+  "executionCount": 125847,
+  "storageType": "sqlite",
+  "healthy": true,
+  "retentionDays": 30,
+  "logStorageEnabled": true
+}
+```
+
+### Manual Pruning
+
+Trigger manual pruning of old execution records:
+
+**API Endpoint**: `POST /api/v1/admin/prune`
+
+```bash
+# Dry run (preview what would be deleted)
+curl -X POST http://localhost:8080/api/v1/admin/prune \
+  -H "Content-Type: application/json" \
+  -d '{"olderThanDays": 30, "dryRun": true}'
+
+# Actual prune
+curl -X POST http://localhost:8080/api/v1/admin/prune \
+  -H "Content-Type: application/json" \
+  -d '{"olderThanDays": 30, "dryRun": false}'
+
+# Prune logs only
+curl -X POST http://localhost:8080/api/v1/admin/prune \
+  -H "Content-Type: application/json" \
+  -d '{"olderThanDays": 30, "pruneLogsOnly": true}'
+```
+
+## Exposing the Dashboard in Production
+
+### Using Ingress
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cronjob-guardian
+  namespace: cronjob-guardian
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - guardian.example.com
+      secretName: guardian-tls
+  rules:
+    - host: guardian.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cronjob-guardian-api
+                port:
+                  number: 8080
+```
+
+### Using LoadBalancer
+
+Update the Helm values:
+
+```yaml
+# values.yaml
+api:
+  enabled: true
+  service:
+    type: LoadBalancer
+    port: 8080
+```
+
+## Dashboard Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Bookmark Key Views" icon="bookmark">
+    Bookmark frequently used CronJob detail pages for quick access.
+  </Card>
+  
+  <Card title="Set Up Monitoring Dashboards" icon="chart-line">
+    Export Prometheus metrics and create Grafana dashboards for long-term trends.
+  </Card>
+  
+  <Card title="Use Filters" icon="filter">
+    Use namespace and status filters to focus on critical jobs.
+  </Card>
+  
+  <Card title="Check Health Regularly" icon="heartbeat">
+    Monitor the `/health` endpoint to ensure Guardian is running properly.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+    Common issues and solutions
+  </Card>
+  <Card title="REST API Reference" icon="code" href="/guides/dashboard">
+    Complete API documentation
+  </Card>
+</CardGroup>

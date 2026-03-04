@@ -1,0 +1,580 @@
+---
+title: "Advanced Monitor Features"
+description: "SLA tracking, duration regression detection, and maintenance windows"
+---
+
+## Overview
+
+Beyond basic failure detection, CronJob Guardian provides advanced features for production reliability:
+
+- **SLA Tracking**: Monitor success rates over time
+- **Duration Regression**: Detect when jobs start taking longer
+- **Maintenance Windows**: Suppress alerts during planned maintenance
+- **Suspended Handling**: Manage monitoring of paused CronJobs
+- **Custom Fix Suggestions**: Provide automated remediation guidance
+
+## Database Backup Monitoring
+
+Critical backup jobs require strict SLA enforcement and fast detection of issues.
+
+```yaml monitors/database-backups.yaml
+# Database Backup Monitoring
+# Monitors critical backup jobs with strict SLA requirements
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h  # Daily backups with 1h buffer
+  sla:
+    enabled: true
+    minSuccessRate: 100  # Backups must never fail
+    maxDuration: 1h      # Alert if backup takes too long
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+        severities: [critical]
+    severityOverrides:
+      jobFailed: critical
+      deadManTriggered: critical
+    # Custom fix suggestion for backup failures
+    suggestedFixPatterns:
+      - name: disk-full
+        match:
+          logPattern: "No space left on device|disk full"
+        suggestion: "Backup storage is full. Check PVC usage: kubectl get pvc -n {\{.Namespace}\}"
+        priority: 150
+```
+
+### What This Does
+
+- Enforces 100% success rate (any failure triggers an alert)
+- Alerts if backups take longer than 1 hour
+- Pages the DBA team immediately on any issue
+- Provides custom troubleshooting for disk-full errors
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Label backup CronJobs">
+    ```bash
+    kubectl label cronjob postgres-backup type=backup -n databases
+    kubectl label cronjob mysql-backup type=backup -n databases
+    ```
+  </Step>
+
+  <Step title="Create PagerDuty alert channel">
+    ```bash
+    kubectl create secret generic pagerduty-key \
+      --namespace cronjob-guardian \
+      --from-literal=routing-key=<dba-team-routing-key>
+    
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: pagerduty-dba
+    spec:
+      type: pagerduty
+      pagerduty:
+        routingKeySecretRef:
+          name: pagerduty-key
+          namespace: cronjob-guardian
+          key: routing-key
+    EOF
+    ```
+  </Step>
+
+  <Step title="Apply the monitor">
+    ```bash
+    kubectl apply -f database-backups.yaml
+    ```
+  </Step>
+
+  <Step title="Verify SLA tracking">
+    Check the monitor status for SLA metrics:
+
+    ```bash
+    kubectl get cronjobmonitor database-backups -n databases -o yaml
+    ```
+
+    Look for:
+
+    ```yaml
+    status:
+      sla:
+        currentSuccessRate: 100.0
+        recentExecutions: 24
+        failures: 0
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  A 100% SLA requirement means **any failure triggers an alert**. This is appropriate for critical backups but may be too strict for other workloads. For most jobs, 95-99% is more realistic.
+</Warning>
+
+## ETL Pipeline with Duration Regression
+
+Data pipelines should not only succeed but also run in a predictable time window. Detect performance degradation early.
+
+```yaml monitors/data-pipeline.yaml
+# Data Pipeline Monitoring
+# Tracks ETL performance with duration regression detection
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: etl-pipeline
+  namespace: data-eng
+spec:
+  selector:
+    matchLabels:
+      pipeline: etl
+  deadManSwitch:
+    enabled: true
+    autoFromSchedule:
+      enabled: true
+      buffer: 30m
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+    # ETL jobs have duration SLAs
+    maxDuration: 2h
+    durationRegressionThreshold: 25  # Alert if P95 increases by 25%
+    durationBaselineWindowDays: 14
+  alerting:
+    channelRefs:
+      - name: slack-data-eng
+    # Include logs to debug ETL failures
+    includeContext:
+      logs: true
+      logLines: 200
+```
+
+### What This Does
+
+- Auto-detects expected run intervals from CronJob schedules
+- Alerts if jobs take longer than 2 hours (hard limit)
+- Detects duration regression if P95 duration increases by 25% compared to the last 14 days
+- Includes 200 lines of logs in alerts for debugging
+
+### Duration Regression Detection
+
+This is powerful for catching performance degradation:
+
+1. Guardian calculates a baseline P95 duration over the last 14 days
+2. Compares recent runs to the baseline
+3. Alerts if the P95 duration increases by more than 25%
+
+Example:
+- Baseline P95: 45 minutes
+- Recent P95: 60 minutes
+- Increase: 33% (exceeds 25% threshold)
+- Result: Alert triggered
+
+<Tip>
+  Tune `durationRegressionThreshold` based on your workload variability:
+  
+  - **Stable workloads**: 15-25% (detect small changes)
+  - **Variable workloads**: 50-75% (avoid false positives)
+  - **Data-driven**: Start at 50%, reduce as you understand variance
+</Tip>
+
+### Setup Instructions
+
+<Steps>
+  <Step title="Label ETL CronJobs">
+    ```bash
+    kubectl label cronjob daily-etl pipeline=etl -n data-eng
+    kubectl label cronjob hourly-sync pipeline=etl -n data-eng
+    ```
+  </Step>
+
+  <Step title="Apply the monitor">
+    ```bash
+    kubectl apply -f data-pipeline.yaml
+    ```
+  </Step>
+
+  <Step title="Wait for baseline">
+    Duration regression requires historical data. Wait at least 14 days (the baseline window) before regression detection activates.
+
+    Check baseline status:
+
+    ```bash
+    kubectl get cronjobmonitor etl-pipeline -n data-eng -o jsonpath='{.status.sla.durationBaseline}'
+    ```
+  </Step>
+
+  <Step title="Test regression detection">
+    Simulate a slow job:
+
+    ```yaml
+    # Add a sleep to your job temporarily
+    command: ["/bin/sh", "-c", "sleep 3600 && /etl.sh"]
+    ```
+
+    After the job runs, check for a regression alert in your Slack channel.
+  </Step>
+</Steps>
+
+## Financial Reports with Maintenance Windows
+
+Suppress alerts during planned downtime like month-end processing or system upgrades.
+
+```yaml monitors/financial-reports.yaml
+# Financial Report Monitoring
+# Monitors business-critical reports with maintenance windows
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: financial-reports
+  namespace: finance
+spec:
+  selector:
+    matchNames:
+      - daily-revenue-report
+      - weekly-summary
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  maintenanceWindows:
+    - name: quarter-end
+      schedule: "0 0 1 1,4,7,10 *"  # First day of each quarter
+      duration: 24h
+      suppressAlerts: true
+  alerting:
+    channelRefs:
+      - name: slack-finance
+```
+
+### What This Does
+
+- Monitors two specific reports by name
+- Defines a quarterly maintenance window on Jan 1, Apr 1, Jul 1, Oct 1
+- Suppresses alerts for 24 hours during quarter-end processing
+- Automatically resumes monitoring after the window
+
+### Maintenance Window Examples
+
+<CodeGroup>
+```yaml Weekly Maintenance
+maintenanceWindows:
+  - name: weekly-maintenance
+    schedule: "0 2 * * 0"  # Every Sunday at 2 AM
+    duration: 4h
+    timezone: America/New_York
+    suppressAlerts: true
+```
+
+```yaml Monthly Deployment Window
+maintenanceWindows:
+  - name: monthly-deploy
+    schedule: "0 0 1 * *"  # First day of every month
+    duration: 8h
+    timezone: UTC
+    suppressAlerts: true
+```
+
+```yaml Daily Backup Window
+maintenanceWindows:
+  - name: backup-window
+    schedule: "0 1 * * *"  # Every day at 1 AM
+    duration: 2h
+    suppressAlerts: false  # Still monitor, just marked as maintenance
+```
+
+```yaml Specific Dates (One-Time)
+maintenanceWindows:
+  - name: migration
+    schedule: "0 0 15 3 *"  # March 15 at midnight
+    duration: 48h  # Two-day migration window
+    suppressAlerts: true
+```
+</CodeGroup>
+
+<Note>
+  Maintenance window schedules use the same cron syntax as CronJobs. Use [crontab.guru](https://crontab.guru/) to verify your expressions.
+</Note>
+
+## Suspended CronJob Handling
+
+Control how monitoring behaves when CronJobs are manually suspended.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: with-suspend-handling
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  suspendedHandling:
+    pauseMonitoring: true           # Pause monitoring when CronJob is suspended
+    alertIfSuspendedFor: 168h       # Alert if suspended for more than 7 days
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+### What This Does
+
+- When a CronJob is suspended (`.spec.suspend: true`), monitoring pauses
+- No dead-man's switch alerts while suspended
+- If the CronJob remains suspended for 7 days, send a reminder alert
+- Monitoring automatically resumes when unsuspended
+
+### Use Cases
+
+- **Short-term suspension**: Pause a job for debugging without triggering alerts
+- **Long-term reminder**: Detect forgotten suspended jobs
+- **Planned downtime**: Suspend jobs during migrations without alert noise
+
+## Full-Featured Configuration
+
+A comprehensive example demonstrating all available options:
+
+```yaml monitors/full-featured.yaml (excerpt)
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: full-featured
+  namespace: production
+spec:
+  selector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [critical, high]
+
+  deadManSwitch:
+    enabled: true
+    autoFromSchedule:
+      enabled: true
+      buffer: 1h
+      missedScheduleThreshold: 2  # Alert after 2 missed schedules
+
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+    maxDuration: 30m
+    durationRegressionThreshold: 50
+    durationBaselineWindowDays: 14
+
+  suspendedHandling:
+    pauseMonitoring: true
+    alertIfSuspendedFor: 168h
+
+  maintenanceWindows:
+    - name: weekly-maintenance
+      schedule: "0 2 * * 0"
+      duration: 4h
+      timezone: America/New_York
+      suppressAlerts: true
+
+  alerting:
+    enabled: true
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]
+      - name: slack-ops
+        severities: [critical, warning]
+    
+    severityOverrides:
+      jobFailed: critical
+      slaBreached: warning
+      missedSchedule: warning
+      deadManTriggered: critical
+      durationRegression: warning
+    
+    suppressDuplicatesFor: 1h
+    alertDelay: 5m
+    
+    includeContext:
+      logs: true
+      logLines: 100
+      events: true
+      podStatus: true
+      suggestedFixes: true
+    
+    suggestedFixPatterns:
+      - name: custom-oom
+        match:
+          exitCode: 137
+        suggestion: "Container was OOM killed. Consider increasing memory limits for {\{.Namespace}\}/{\{.Name}\}"
+        priority: 150
+
+  dataRetention:
+    retentionDays: 60
+    onCronJobDeletion: purge-after-days
+    purgeAfterDays: 7
+    storeLogs: true
+    logRetentionDays: 30
+```
+
+### Key Features Explained
+
+<AccordionGroup>
+  <Accordion title="Auto Dead-Man's Switch">
+    ```yaml
+    deadManSwitch:
+      autoFromSchedule:
+        enabled: true
+        buffer: 1h
+        missedScheduleThreshold: 2
+    ```
+
+    Instead of hardcoding `maxTimeSinceLastSuccess`, Guardian calculates it from the CronJob's schedule:
+    
+    - Schedule: `0 */6 * * *` (every 6 hours)
+    - Expected interval: 6 hours
+    - With buffer: 7 hours
+    - Alert after: 2 missed schedules = 14 hours
+  </Accordion>
+
+  <Accordion title="Severity Overrides">
+    ```yaml
+    severityOverrides:
+      jobFailed: critical      # Job failures are critical
+      slaBreached: warning     # SLA breach is a warning
+      durationRegression: warning
+    ```
+
+    Customize alert severity per alert type. Default severities:
+    - `jobFailed`: critical
+    - `deadManTriggered`: critical
+    - `slaBreached`: warning
+    - `missedSchedule`: warning
+    - `durationRegression`: warning
+  </Accordion>
+
+  <Accordion title="Alert Delays and Deduplication">
+    ```yaml
+    alerting:
+      alertDelay: 5m             # Wait 5 minutes before sending
+      suppressDuplicatesFor: 1h  # Don't resend same alert for 1 hour
+    ```
+
+    - **Alert Delay**: Waits 5 minutes before sending. If the issue resolves (e.g., job retries and succeeds), the alert is cancelled.
+    - **Suppress Duplicates**: Prevents alert fatigue by not resending the same alert multiple times.
+  </Accordion>
+
+  <Accordion title="Context Inclusion">
+    ```yaml
+    includeContext:
+      logs: true
+      logLines: 100
+      events: true
+      podStatus: true
+      suggestedFixes: true
+    ```
+
+    Alerts include:
+    - Last 100 lines of pod logs
+    - Kubernetes events related to the job
+    - Pod status (exit codes, reasons)
+    - AI-generated fix suggestions based on error patterns
+  </Accordion>
+
+  <Accordion title="Custom Fix Patterns">
+    ```yaml
+    suggestedFixPatterns:
+      - name: custom-oom
+        match:
+          exitCode: 137
+        suggestion: "Container was OOM killed. Increase memory limits."
+        priority: 150
+    ```
+
+    Define custom troubleshooting advice based on:
+    - Exit codes
+    - Log patterns (regex)
+    - Error messages
+    
+    Higher priority patterns (>100) override built-in suggestions.
+  </Accordion>
+
+  <Accordion title="Data Retention">
+    ```yaml
+    dataRetention:
+      retentionDays: 60
+      onCronJobDeletion: purge-after-days
+      purgeAfterDays: 7
+    ```
+
+    - Keep execution history for 60 days
+    - When a CronJob is deleted, retain data for 7 more days before purging
+    - Useful for post-mortem analysis of deleted jobs
+  </Accordion>
+</AccordionGroup>
+
+## Common Patterns
+
+### High-Availability Jobs
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 99.9
+  windowDays: 30  # Longer window for accurate percentage
+  maxDuration: 15m
+alertring:
+  channelRefs:
+    - name: pagerduty-critical
+      severities: [critical]
+  alertDelay: 0  # No delay, page immediately
+```
+
+### Variable-Duration Jobs
+
+```yaml
+sla:
+  enabled: true
+  # Don't set maxDuration for jobs with variable runtime
+  durationRegressionThreshold: 100  # Alert if duration doubles
+  durationBaselineWindowDays: 30    # Longer baseline for stability
+```
+
+### Development Environment
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 80  # More lenient
+  windowDays: 7
+alertring:
+  channelRefs:
+    - name: slack-dev
+      severities: [critical]  # Only critical alerts
+  suppressDuplicatesFor: 6h  # Reduce noise
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Slack Alerts" icon="slack" href="/examples/slack-alerts">
+    Configure Slack alert channels
+  </Card>
+  <Card title="PagerDuty Alerts" icon="bullhorn" href="/examples/pagerduty-alerts">
+    Set up on-call escalation
+  </Card>
+  <Card title="Webhook Alerts" icon="webhook" href="/examples/webhook-alerts">
+    Integrate with custom systems
+  </Card>
+  <Card title="Monitor Reference" icon="book" href="/api/cronjobmonitor">
+    Complete API documentation
+  </Card>
+</CardGroup>

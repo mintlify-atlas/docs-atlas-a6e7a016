@@ -1,0 +1,679 @@
+---
+title: Storage
+description: Database options, configuration, retention policies, and migration strategies
+---
+
+## Overview
+
+CronJob Guardian uses a pluggable storage backend to persist execution history, alert records, and channel statistics. The storage layer is abstracted through an interface, allowing support for multiple database engines.
+
+## Supported Databases
+
+Three database engines are supported:
+
+### SQLite (Default)
+
+**Use case:** Development, small deployments, single-namespace monitoring
+
+**Characteristics:**
+- Pure Go implementation (no CGO required)
+- File-based storage requiring persistent volume
+- WAL (Write-Ahead Logging) mode enabled automatically
+- Busy timeout set to 5000ms for better concurrency
+- Suitable for under 500 CronJobs
+- Not recommended for HA deployments
+
+**Configuration:**
+
+```yaml
+storage:
+  type: sqlite
+  sqlite:
+    path: /data/guardian.db
+```
+
+**Connection string:** `/data/guardian.db?_journal_mode=WAL&_busy_timeout=5000`
+
+**Helm chart persistence:**
+
+```yaml
+persistence:
+  enabled: true
+  storageClass: "-"  # Use default storage class
+  size: 1Gi
+  accessModes:
+    - ReadWriteOnce
+
+config:
+  storage:
+    type: sqlite
+    sqlite:
+      path: /data/guardian.db
+```
+
+### PostgreSQL
+
+**Use case:** Production deployments, HA configurations, large scale (>500 CronJobs)
+
+**Characteristics:**
+- Full ACID compliance
+- Native percentile functions (`PERCENTILE_CONT`) for O(1) memory usage
+- Connection pooling support
+- SSL/TLS support
+- HA-ready with external database
+- Recommended for production
+
+**Configuration:**
+
+```yaml
+storage:
+  type: postgres
+  postgres:
+    host: postgres.default.svc.cluster.local
+    port: 5432
+    database: guardian
+    username: guardian
+    password: ""  # Use GUARDIAN_STORAGE_POSTGRES_PASSWORD env var
+    ssl-mode: require
+    pool:
+      max-idle-conns: 10
+      max-open-conns: 100
+      conn-max-lifetime: 1h
+      conn-max-idle-time: 10m
+```
+
+**Environment variable for password:**
+
+```bash
+GUARDIAN_STORAGE_POSTGRES_PASSWORD=your-secure-password
+```
+
+**Helm chart with existing secret:**
+
+```yaml
+config:
+  storage:
+    type: postgres
+    postgres:
+      host: postgres.default.svc.cluster.local
+      port: 5432
+      database: guardian
+      username: guardian
+      existingSecret: postgres-credentials
+      existingSecretKey: password
+      sslMode: require
+      pool:
+        maxOpenConns: 100
+        maxIdleConns: 10
+        connMaxLifetime: 1h
+        connMaxIdleTime: 10m
+```
+
+**Create the secret:**
+
+```bash
+kubectl create secret generic postgres-credentials \
+  --namespace cronjob-guardian \
+  --from-literal=password='your-secure-password'
+```
+
+### MySQL / MariaDB
+
+**Use case:** Production deployments, existing MySQL infrastructure
+
+**Characteristics:**
+- Full ACID compliance
+- Connection pooling support
+- Compatible with MySQL 5.7+ and MariaDB 10.3+
+- HA-ready with external database
+
+**Configuration:**
+
+```yaml
+storage:
+  type: mysql
+  mysql:
+    host: mysql.default.svc.cluster.local
+    port: 3306
+    database: guardian
+    username: guardian
+    password: ""  # Use GUARDIAN_STORAGE_MYSQL_PASSWORD env var
+    pool:
+      max-idle-conns: 10
+      max-open-conns: 100
+      conn-max-lifetime: 1h
+      conn-max-idle-time: 10m
+```
+
+**Environment variable for password:**
+
+```bash
+GUARDIAN_STORAGE_MYSQL_PASSWORD=your-secure-password
+```
+
+**Connection string:** `guardian:password@tcp(mysql.default.svc.cluster.local:3306)/guardian?parseTime=true`
+
+## Database Schema
+
+The schema is automatically created and migrated on startup using GORM auto-migration.
+
+### Tables
+
+#### executions
+
+Stores job execution history.
+
+**Key columns:**
+- `id` (bigint, primary key) - Auto-increment ID
+- `cronjob_ns` (varchar 253) - CronJob namespace
+- `cronjob_name` (varchar 253) - CronJob name
+- `cronjob_uid` (varchar 36) - CronJob UID for recreation detection
+- `job_name` (varchar 253) - Kubernetes Job name
+- `scheduled_time` (timestamp, nullable) - Scheduled start time from CronJob
+- `start_time` (timestamp) - Actual start time
+- `completion_time` (timestamp) - Completion time
+- `duration_secs` (float, nullable) - Duration in seconds
+- `succeeded` (boolean) - Success status
+- `exit_code` (int) - Container exit code
+- `reason` (varchar 255) - Failure reason
+- `is_retry` (boolean) - Whether this is a retry
+- `retry_of` (varchar 253) - Original job name if retry
+- `logs` (text, nullable) - Pod logs (if enabled)
+- `events` (text, nullable) - Kubernetes events (if enabled)
+- `suggested_fix` (text) - AI-generated fix suggestion
+- `created_at` (timestamp) - Record creation time
+
+**Indexes:**
+- `idx_cronjob_time` (cronjob_ns, cronjob_name, start_time DESC)
+- `idx_cronjob_uid` (cronjob_ns, cronjob_name, cronjob_uid)
+- `idx_cronjob_duration` (cronjob_ns, cronjob_name, start_time, duration_secs)
+- `idx_job_name` (job_name)
+- `idx_start_time` (start_time)
+
+#### alert_history
+
+Stores alert events and resolutions.
+
+**Key columns:**
+- `id` (bigint, primary key) - Auto-increment ID
+- `alert_type` (varchar 100) - Alert type (JobFailed, SLABreached, DeadManSwitch, etc.)
+- `severity` (varchar 20) - Severity level (critical, warning, info)
+- `title` (varchar 500) - Alert title
+- `message` (text) - Alert message body
+- `cronjob_ns` (varchar 253) - CronJob namespace
+- `cronjob_name` (varchar 253) - CronJob name
+- `monitor_ns` (varchar 253) - Monitor namespace
+- `monitor_name` (varchar 253) - Monitor name
+- `channels_notified` (text) - Comma-separated channel names
+- `occurred_at` (timestamp) - Alert occurrence time
+- `resolved_at` (timestamp, nullable) - Alert resolution time
+- `exit_code` (int) - Exit code for failure alerts
+- `reason` (varchar 255) - Failure reason
+- `suggested_fix` (text) - Fix suggestion
+
+**Indexes:**
+- `idx_alert_cronjob` (cronjob_ns, cronjob_name)
+- `idx_alert_cronjob_time` (cronjob_ns, cronjob_name, occurred_at DESC)
+- `idx_alert_occurred` (occurred_at DESC)
+- `idx_alert_severity` (severity)
+- `idx_alert_resolve` (alert_type, cronjob_ns, cronjob_name, resolved_at)
+- `idx_alert_unresolved` (resolved_at) - For filtering unresolved alerts
+
+#### channel_stats
+
+Stores per-channel alert statistics.
+
+**Key columns:**
+- `id` (bigint, primary key) - Auto-increment ID
+- `channel_name` (varchar 253, unique) - Channel name
+- `alerts_sent_total` (bigint) - Total alerts sent successfully
+- `alerts_failed_total` (bigint) - Total failed alert attempts
+- `last_alert_time` (timestamp, nullable) - Last successful alert
+- `last_failed_time` (timestamp, nullable) - Last failed alert
+- `last_failed_error` (text) - Last failure error message
+- `consecutive_failures` (int) - Consecutive failures counter
+- `updated_at` (timestamp) - Last update time
+
+**Indexes:**
+- Unique index on `channel_name`
+
+## Connection Pooling
+
+Connection pooling is supported for PostgreSQL and MySQL to optimize database resource usage.
+
+### Configuration Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `max-idle-conns` | 10 | Maximum idle connections in pool |
+| `max-open-conns` | 100 | Maximum open connections |
+| `conn-max-lifetime` | 1h | Maximum connection lifetime |
+| `conn-max-idle-time` | 10m | Maximum idle time before closing |
+
+### Tuning Guidelines
+
+**Small deployments (under 100 CronJobs):**
+```yaml
+pool:
+  max-idle-conns: 5
+  max-open-conns: 25
+  conn-max-lifetime: 1h
+  conn-max-idle-time: 10m
+```
+
+**Medium deployments (100-500 CronJobs):**
+```yaml
+pool:
+  max-idle-conns: 10
+  max-open-conns: 100
+  conn-max-lifetime: 1h
+  conn-max-idle-time: 10m
+```
+
+**Large deployments (>500 CronJobs):**
+```yaml
+pool:
+  max-idle-conns: 20
+  max-open-conns: 200
+  conn-max-lifetime: 30m
+  conn-max-idle-time: 5m
+```
+
+**High availability (multiple replicas):**
+- Multiply `max-open-conns` by number of replicas
+- Ensure database server `max_connections` > total connections from all replicas
+- Example: 3 replicas × 100 conns = 300, so database needs 300+ max_connections
+
+## Retention Policies
+
+### Execution History Retention
+
+Execution records are automatically pruned based on age.
+
+**Configuration:**
+
+```yaml
+history-retention:
+  default-days: 30  # Default retention period
+  max-days: 90      # Maximum allowed retention
+
+scheduler:
+  prune-interval: 1h  # How often to run pruning
+```
+
+**Behavior:**
+- History pruner runs every `prune-interval` (default: 1 hour)
+- Deletes execution records older than `default-days`
+- Per-monitor overrides respected (via `CronJobMonitor.spec.dataRetention`)
+- Maximum retention capped at `max-days` even with per-monitor overrides
+
+**Per-monitor override:**
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: critical-job-monitor
+spec:
+  dataRetention:
+    executionHistoryDays: 90  # Keep for 90 days (up to max-days)
+  # ...
+```
+
+### Log Retention
+
+Logs can have separate retention from execution metadata.
+
+**Configuration:**
+
+```yaml
+storage:
+  log-storage-enabled: true  # Opt-in to log storage
+  log-retention-days: 7      # Keep logs for 7 days
+  max-log-size-kb: 100       # Limit per-execution log size
+```
+
+**Behavior:**
+- If `log-retention-days: 0`, logs are kept for same duration as executions
+- If `log-retention-days > 0`, logs are pruned earlier than execution records
+- Pruning only removes `logs` and `events` columns, execution metadata remains
+- Useful for long execution history without excessive storage
+
+**Example: 90-day execution history, 7-day logs**
+
+```yaml
+history-retention:
+  default-days: 90
+
+storage:
+  log-storage-enabled: true
+  log-retention-days: 7
+```
+
+Result: Execution records kept for 90 days, but logs only stored for 7 days.
+
+## Log and Event Storage
+
+By default, logs and events are **not** stored in the database. Enable opt-in:
+
+### Configuration
+
+```yaml
+storage:
+  # Enable storing pod logs in database
+  log-storage-enabled: true
+  
+  # Enable storing Kubernetes events in database
+  event-storage-enabled: true
+  
+  # Maximum log size per execution (KB)
+  max-log-size-kb: 100
+  
+  # Log retention (0 = use history-retention.default-days)
+  log-retention-days: 7
+```
+
+### Storage Impact
+
+Enabling log storage significantly increases database size:
+
+**Without logs:**
+- ~1 KB per execution record
+- 1000 executions = ~1 MB
+
+**With logs (100 KB per execution):**
+- ~100 KB per execution record
+- 1000 executions = ~100 MB
+
+**Recommendation:** Only enable for debugging or when logs need long-term storage. Use shorter `log-retention-days` than execution history.
+
+## Database Setup
+
+### PostgreSQL Setup
+
+#### 1. Create Database and User
+
+```sql
+-- Connect as superuser
+psql -h postgres.example.com -U postgres
+
+-- Create database
+CREATE DATABASE guardian;
+
+-- Create user
+CREATE USER guardian WITH PASSWORD 'your-secure-password';
+
+-- Grant privileges
+GRANT ALL PRIVILEGES ON DATABASE guardian TO guardian;
+
+-- Switch to guardian database
+\c guardian
+
+-- Grant schema privileges (PostgreSQL 15+)
+GRANT ALL ON SCHEMA public TO guardian;
+```
+
+#### 2. Configure Operator
+
+```yaml
+storage:
+  type: postgres
+  postgres:
+    host: postgres.example.com
+    port: 5432
+    database: guardian
+    username: guardian
+    # Password via environment variable
+    ssl-mode: require
+```
+
+#### 3. SSL/TLS Setup (Recommended)
+
+For production, use SSL certificates:
+
+```yaml
+storage:
+  postgres:
+    ssl-mode: verify-full
+    # Additional params via DSN if needed
+```
+
+### MySQL Setup
+
+#### 1. Create Database and User
+
+```sql
+-- Connect as root
+mysql -h mysql.example.com -u root -p
+
+-- Create database
+CREATE DATABASE guardian CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- Create user
+CREATE USER 'guardian'@'%' IDENTIFIED BY 'your-secure-password';
+
+-- Grant privileges
+GRANT ALL PRIVILEGES ON guardian.* TO 'guardian'@'%';
+FLUSH PRIVILEGES;
+```
+
+#### 2. Configure Operator
+
+```yaml
+storage:
+  type: mysql
+  mysql:
+    host: mysql.example.com
+    port: 3306
+    database: guardian
+    username: guardian
+    # Password via environment variable
+```
+
+### SQLite Setup
+
+No manual setup required. Database file is created automatically.
+
+**Ensure persistent volume is configured:**
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: guardian-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+## Backup and Recovery
+
+### SQLite Backup
+
+**Option 1: Volume snapshot**
+
+Use Kubernetes VolumeSnapshot resources:
+
+```yaml
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: guardian-backup-2026-03-04
+spec:
+  source:
+    persistentVolumeClaimName: guardian-data
+  volumeSnapshotClassName: default
+```
+
+**Option 2: SQLite backup command**
+
+```bash
+# Execute inside pod
+kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+  sqlite3 /data/guardian.db ".backup /data/backup.db"
+
+# Copy out
+kubectl cp cronjob-guardian/guardian-pod:/data/backup.db ./backup.db
+```
+
+### PostgreSQL Backup
+
+**Option 1: pg_dump**
+
+```bash
+# Create backup
+pg_dump -h postgres.example.com -U guardian -d guardian -F c -f guardian-backup.dump
+
+# Restore
+pg_restore -h postgres.example.com -U guardian -d guardian guardian-backup.dump
+```
+
+**Option 2: Continuous archiving (WAL)**
+
+Configure PostgreSQL continuous archiving for point-in-time recovery.
+
+### MySQL Backup
+
+**Option 1: mysqldump**
+
+```bash
+# Create backup
+mysqldump -h mysql.example.com -u guardian -p guardian > guardian-backup.sql
+
+# Restore
+mysql -h mysql.example.com -u guardian -p guardian < guardian-backup.sql
+```
+
+**Option 2: Physical backup**
+
+Use Percona XtraBackup or MySQL Enterprise Backup for hot backups.
+
+## Migration Between Database Engines
+
+Migrating from one database engine to another requires export and import.
+
+### Export Data
+
+**Using REST API (recommended):**
+
+```bash
+# Export all execution data as JSON
+curl -o executions.json http://cronjob-guardian.example.com/api/v1/export/executions
+
+# Export alert history
+curl -o alerts.json http://cronjob-guardian.example.com/api/v1/export/alerts
+```
+
+### Import Data
+
+**Manual import (SQL):**
+
+1. Start new operator with target database
+2. Let auto-migration create schema
+3. Export data from old database (CSV/JSON)
+4. Import into new database using database tools
+
+**Note:** Full migration tooling is planned for a future release.
+
+## Troubleshooting
+
+### Connection Issues
+
+**PostgreSQL connection refused:**
+
+```bash
+# Test connectivity from pod
+kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+  nc -zv postgres.example.com 5432
+
+# Check password
+kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+  env | grep POSTGRES_PASSWORD
+```
+
+**MySQL authentication failed:**
+
+```bash
+# Check user grants
+mysql -h mysql.example.com -u root -p -e "SHOW GRANTS FOR 'guardian'@'%';"
+```
+
+### Performance Issues
+
+**Slow queries:**
+
+```bash
+# PostgreSQL: Enable query logging
+ALTER DATABASE guardian SET log_min_duration_statement = 1000;
+
+# Check slow query log
+kubectl logs -n cronjob-guardian deploy/cronjob-guardian | grep "slow query"
+```
+
+**High memory usage:**
+
+- Reduce `storage.max-log-size-kb`
+- Lower retention periods
+- Increase pruning frequency
+- Tune connection pool settings
+
+### Storage Full
+
+**SQLite disk full:**
+
+```bash
+# Check PVC usage
+kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- df -h /data
+
+# Resize PVC (if supported)
+kubectl patch pvc guardian-data -n cronjob-guardian \
+  -p '{"spec":{"resources":{"requests":{"storage":"5Gi"}}}}'
+```
+
+**Manual cleanup:**
+
+```bash
+# Delete old records (execute in database)
+DELETE FROM executions WHERE start_time < NOW() - INTERVAL '30 days';
+DELETE FROM alert_history WHERE occurred_at < NOW() - INTERVAL '30 days';
+VACUUM FULL;  -- PostgreSQL
+OPTIMIZE TABLE executions;  -- MySQL
+```
+
+## Best Practices
+
+### Production Deployments
+
+1. **Use PostgreSQL or MySQL** - Better performance and HA support
+2. **Enable SSL/TLS** - Encrypt database connections
+3. **Use connection pooling** - Tune for your workload
+4. **Regular backups** - Automate database backups
+5. **Monitor storage** - Alert on disk usage
+6. **Separate log retention** - Keep logs shorter than executions
+7. **External database** - Don't run database in same cluster
+
+### High Availability
+
+1. **External database cluster** - PostgreSQL HA (Patroni, Stolon) or MySQL Galera
+2. **Multiple operator replicas** - Enable leader election
+3. **Database connection limits** - Set appropriate `max-open-conns`
+4. **Health monitoring** - Monitor database health separately
+
+### Storage Optimization
+
+1. **Disable log storage** - Unless required for auditing
+2. **Aggressive log retention** - 7 days or less
+3. **Reasonable execution retention** - 30-90 days
+4. **Regular pruning** - Run every hour
+5. **Database maintenance** - Regular VACUUM/OPTIMIZE
+
+### Security
+
+1. **Strong passwords** - Use secret management
+2. **Least privilege** - Grant minimum database permissions
+3. **Network policies** - Restrict database access
+4. **SSL/TLS** - Encrypt all connections
+5. **Audit logging** - Enable database audit logs

@@ -1,0 +1,808 @@
+---
+title: "CronJobMonitor API Reference"
+description: "Complete API reference for the CronJobMonitor Custom Resource Definition"
+---
+
+## Overview
+
+The `CronJobMonitor` is a namespaced Custom Resource that defines monitoring configuration for Kubernetes CronJobs. It enables dead-man's switch monitoring, SLA tracking, alerting, and data retention policies.
+
+**API Group:** `guardian.illenium.net/v1alpha1`
+
+**Kind:** `CronJobMonitor`
+
+**Scope:** Namespaced
+
+## Basic Example
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: critical-jobs
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+  alerting:
+    enabled: true
+    channelRefs:
+      - name: slack-ops
+        severities: [critical, warning]
+```
+
+## Spec Fields
+
+### selector
+
+<ParamField path="selector" type="object">
+  Specifies which CronJobs to monitor. An empty selector matches all CronJobs in the monitor's namespace.
+  
+  <Expandable title="properties">
+    <ParamField path="matchLabels" type="map[string]string">
+      Selects CronJobs by exact label matches.
+      
+      ```yaml
+      matchLabels:
+        tier: critical
+        app: backup
+      ```
+    </ParamField>
+    
+    <ParamField path="matchExpressions" type="array">
+      Selects CronJobs by label expressions. Each expression is a `LabelSelectorRequirement`.
+      
+      ```yaml
+      matchExpressions:
+        - key: tier
+          operator: In
+          values: [critical, high]
+        - key: environment
+          operator: NotIn
+          values: [dev, test]
+      ```
+      
+      Supported operators: `In`, `NotIn`, `Exists`, `DoesNotExist`
+    </ParamField>
+    
+    <ParamField path="matchNames" type="array">
+      Explicitly lists CronJob names to monitor. Only valid when watching a single namespace.
+      
+      ```yaml
+      matchNames:
+        - daily-backup
+        - weekly-report
+      ```
+    </ParamField>
+    
+    <ParamField path="namespaces" type="array">
+      Explicitly lists namespaces to watch for CronJobs. If empty and `namespaceSelector` is not set, watches only the monitor's namespace.
+      
+      ```yaml
+      namespaces:
+        - production
+        - staging
+      ```
+    </ParamField>
+    
+    <ParamField path="namespaceSelector" type="object">
+      Selects namespaces by labels. CronJobs in matching namespaces will be monitored. Uses standard `LabelSelector` format.
+      
+      ```yaml
+      namespaceSelector:
+        matchLabels:
+          env: production
+      ```
+    </ParamField>
+    
+    <ParamField path="allNamespaces" type="boolean" default="false">
+      Watches CronJobs in all namespaces (except globally ignored ones). Takes precedence over `namespaces` and `namespaceSelector`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### deadManSwitch
+
+<ParamField path="deadManSwitch" type="object">
+  Configures dead-man's switch behavior to alert if CronJobs don't execute successfully within expected intervals.
+  
+  <Expandable title="properties">
+    <ParamField path="enabled" type="boolean" default="true">
+      Turns on dead-man's switch monitoring.
+    </ParamField>
+    
+    <ParamField path="maxTimeSinceLastSuccess" type="duration">
+      Alerts if no successful execution within this duration. Use for fixed-interval monitoring.
+      
+      Example: `"25h"` for daily jobs with 1-hour buffer
+      
+      Mutually exclusive with `autoFromSchedule`.
+    </ParamField>
+    
+    <ParamField path="autoFromSchedule" type="object">
+      Auto-calculates expected interval from the CronJob's schedule. Alternative to `maxTimeSinceLastSuccess`.
+      
+      <Expandable title="properties">
+        <ParamField path="enabled" type="boolean" required>
+          Turns on auto-detection from cron schedule.
+        </ParamField>
+        
+        <ParamField path="buffer" type="duration" default="1h">
+          Extra time added to the expected interval to account for delays.
+        </ParamField>
+        
+        <ParamField path="missedScheduleThreshold" type="integer" default="1">
+          Number of missed schedules before alerting.
+          
+          **Validation:** Minimum value is `1`
+        </ParamField>
+      </Expandable>
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### sla
+
+<ParamField path="sla" type="object">
+  Configures SLA tracking for success rates and execution durations.
+  
+  <Expandable title="properties">
+    <ParamField path="enabled" type="boolean" default="true">
+      Turns on SLA tracking and alerting.
+    </ParamField>
+    
+    <ParamField path="minSuccessRate" type="number" default="95">
+      Minimum acceptable success rate percentage. Alerts when success rate falls below this threshold.
+      
+      **Validation:** Range `0-100`
+    </ParamField>
+    
+    <ParamField path="windowDays" type="integer" default="7">
+      Rolling window in days for success rate calculation.
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+    
+    <ParamField path="maxDuration" type="duration">
+      Maximum acceptable execution duration. Alerts if any job execution exceeds this duration.
+      
+      Example: `"30m"` for 30 minutes
+    </ParamField>
+    
+    <ParamField path="durationRegressionThreshold" type="integer" default="50">
+      Alerts if P95 duration increases by this percentage compared to the baseline.
+      
+      **Validation:** Range `1-1000`
+      
+      Example: `50` means alert if P95 increases by 50% or more
+    </ParamField>
+    
+    <ParamField path="durationBaselineWindowDays" type="integer" default="14">
+      Number of days for calculating the baseline duration.
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### suspendedHandling
+
+<ParamField path="suspendedHandling" type="object">
+  Configures behavior for suspended CronJobs.
+  
+  <Expandable title="properties">
+    <ParamField path="pauseMonitoring" type="boolean" default="true">
+      Pauses monitoring and suppresses alerts when the CronJob is suspended.
+    </ParamField>
+    
+    <ParamField path="alertIfSuspendedFor" type="duration">
+      Alerts if a CronJob remains suspended longer than this duration. Useful for detecting CronJobs that were suspended and forgotten.
+      
+      Example: `"168h"` for 7 days
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### maintenanceWindows
+
+<ParamField path="maintenanceWindows" type="array">
+  Defines scheduled maintenance periods during which alerts can be suppressed.
+  
+  <Expandable title="array item properties">
+    <ParamField path="name" type="string" required>
+      Identifies this maintenance window.
+    </ParamField>
+    
+    <ParamField path="schedule" type="string" required>
+      Cron expression defining when the window starts.
+      
+      Example: `"0 2 * * 0"` for every Sunday at 2 AM
+    </ParamField>
+    
+    <ParamField path="duration" type="duration" required>
+      How long the maintenance window lasts.
+      
+      Example: `"4h"` for 4 hours
+    </ParamField>
+    
+    <ParamField path="timezone" type="string" default="UTC">
+      Timezone for the schedule.
+      
+      Example: `"America/New_York"`
+    </ParamField>
+    
+    <ParamField path="suppressAlerts" type="boolean" default="true">
+      Whether to suppress alerts during this window.
+    </ParamField>
+  </Expandable>
+  
+  ```yaml
+  maintenanceWindows:
+    - name: weekly-maintenance
+      schedule: "0 2 * * 0"
+      duration: 4h
+      timezone: America/New_York
+      suppressAlerts: true
+  ```
+</ParamField>
+
+### alerting
+
+<ParamField path="alerting" type="object">
+  Configures alert channels and behavior.
+  
+  <Expandable title="properties">
+    <ParamField path="enabled" type="boolean" default="true">
+      Turns on alerting for this monitor.
+    </ParamField>
+    
+    <ParamField path="channelRefs" type="array">
+      References to cluster-scoped `AlertChannel` custom resources.
+      
+      <Expandable title="array item properties">
+        <ParamField path="name" type="string" required>
+          Name of the AlertChannel CR.
+        </ParamField>
+        
+        <ParamField path="severities" type="array">
+          Alert severities to send to this channel. Valid values: `critical`, `warning`. If empty, sends all severities.
+          
+          ```yaml
+          channelRefs:
+            - name: pagerduty-oncall
+              severities: [critical]
+            - name: slack-ops
+              severities: [critical, warning]
+          ```
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="includeContext" type="object">
+      Specifies what context to include in alert notifications.
+      
+      <Expandable title="properties">
+        <ParamField path="logs" type="boolean" default="true">
+          Include pod logs in alerts.
+        </ParamField>
+        
+        <ParamField path="logLines" type="integer" default="50">
+          Number of log lines to include.
+          
+          **Validation:** Range `1-10000`
+        </ParamField>
+        
+        <ParamField path="logContainerName" type="string">
+          Specific container name for logs. Defaults to the first container.
+        </ParamField>
+        
+        <ParamField path="includeInitContainerLogs" type="boolean" default="false">
+          Include init container logs.
+        </ParamField>
+        
+        <ParamField path="events" type="boolean" default="true">
+          Include Kubernetes events.
+        </ParamField>
+        
+        <ParamField path="podStatus" type="boolean" default="true">
+          Include pod status details.
+        </ParamField>
+        
+        <ParamField path="suggestedFixes" type="boolean" default="true">
+          Include suggested fixes based on failure patterns.
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="suppressDuplicatesFor" type="duration" default="1h">
+      Prevents re-sending the same alert within this time window.
+    </ParamField>
+    
+    <ParamField path="alertDelay" type="duration">
+      Delays alert dispatch to allow transient issues to resolve. If the issue resolves (e.g., next job succeeds) before the delay expires, the alert is cancelled and never sent. Useful for flaky jobs.
+      
+      Example: `"5m"` waits 5 minutes before sending failure alerts
+    </ParamField>
+    
+    <ParamField path="severityOverrides" type="object">
+      Customizes severity for specific alert types. Only `critical` and `warning` are valid.
+      
+      <Expandable title="properties">
+        <ParamField path="missedSchedule" type="string">
+          Severity for missed schedule alerts.
+          
+          **Validation:** Enum `critical`, `warning`
+        </ParamField>
+        
+        <ParamField path="jobFailed" type="string">
+          Severity for job failure alerts.
+          
+          **Validation:** Enum `critical`, `warning`
+        </ParamField>
+        
+        <ParamField path="slaBreached" type="string">
+          Severity for SLA breach alerts.
+          
+          **Validation:** Enum `critical`, `warning`
+        </ParamField>
+        
+        <ParamField path="deadManTriggered" type="string">
+          Severity for dead-man's switch alerts.
+          
+          **Validation:** Enum `critical`, `warning`
+        </ParamField>
+        
+        <ParamField path="durationRegression" type="string">
+          Severity for duration regression alerts.
+          
+          **Validation:** Enum `critical`, `warning`
+        </ParamField>
+      </Expandable>
+      
+      ```yaml
+      severityOverrides:
+        jobFailed: critical
+        slaBreached: warning
+        deadManTriggered: critical
+      ```
+    </ParamField>
+    
+    <ParamField path="suggestedFixPatterns" type="array">
+      Defines custom patterns for suggesting fixes based on failure context. These are merged with built-in patterns, with custom patterns taking priority.
+      
+      <Expandable title="array item properties">
+        <ParamField path="name" type="string" required>
+          Identifies this pattern. Use built-in names like `"oom-killed"` to override built-in patterns.
+        </ParamField>
+        
+        <ParamField path="match" type="object" required>
+          Match criteria - at least one field must be specified.
+          
+          <Expandable title="properties">
+            <ParamField path="exitCode" type="integer">
+              Matches specific exit codes. Example: `137` for OOM killed.
+            </ParamField>
+            
+            <ParamField path="exitCodeRange" type="object">
+              Matches a range of exit codes [min, max] inclusive.
+              
+              <Expandable title="properties">
+                <ParamField path="min" type="integer" required>
+                  Minimum exit code.
+                </ParamField>
+                <ParamField path="max" type="integer" required>
+                  Maximum exit code.
+                </ParamField>
+              </Expandable>
+            </ParamField>
+            
+            <ParamField path="reason" type="string">
+              Matches container termination reason (exact match, case-insensitive). Example: `"OOMKilled"`
+            </ParamField>
+            
+            <ParamField path="reasonPattern" type="string">
+              Matches reason using regex. Example: `".*Killed.*"`
+            </ParamField>
+            
+            <ParamField path="logPattern" type="string">
+              Matches log content using regex. Example: `"connection timed out|ETIMEDOUT"`
+            </ParamField>
+            
+            <ParamField path="eventPattern" type="string">
+              Matches event messages using regex.
+            </ParamField>
+          </Expandable>
+        </ParamField>
+        
+        <ParamField path="suggestion" type="string" required>
+          Fix text to display. Supports Go template variables:
+          - `{\{.Namespace}\}` - CronJob namespace
+          - `{\{.Name}\}` - CronJob name
+          - `{\{.ExitCode}\}` - Container exit code
+          - `{\{.Reason}\}` - Termination reason
+          - `{\{.JobName}\}` - Job name
+        </ParamField>
+        
+        <ParamField path="priority" type="integer" default="0">
+          Determines evaluation order (higher = checked first). Built-in patterns use priorities 1-100. Use values >100 to override built-ins.
+        </ParamField>
+      </Expandable>
+      
+      ```yaml
+      suggestedFixPatterns:
+        - name: custom-oom
+          match:
+            exitCode: 137
+          suggestion: "Container OOM killed. Increase memory in {\{.Namespace}\}/{\{.Name}\}"
+          priority: 150
+        - name: connection-timeout
+          match:
+            logPattern: "connection timed out|ETIMEDOUT"
+          suggestion: "Network timeout. Check connectivity to external services."
+          priority: 50
+      ```
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### dataRetention
+
+<ParamField path="dataRetention" type="object">
+  Configures data lifecycle management for this monitor's execution history.
+  
+  <Expandable title="properties">
+    <ParamField path="retentionDays" type="integer">
+      Overrides global retention for this monitor's execution history. If not set, uses the global `history-retention.default-days` setting.
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+    
+    <ParamField path="onCronJobDeletion" type="string">
+      Defines behavior when a monitored CronJob is deleted.
+      
+      **Validation:** Enum `retain`, `purge`, `purge-after-days`
+      
+      - `retain`: Keep all historical data
+      - `purge`: Immediately delete all data
+      - `purge-after-days`: Wait before purging (requires `purgeAfterDays`)
+    </ParamField>
+    
+    <ParamField path="purgeAfterDays" type="integer">
+      Days to wait before purging data. Required when `onCronJobDeletion` is `purge-after-days`.
+      
+      **Validation:** Minimum value is `0`
+    </ParamField>
+    
+    <ParamField path="onRecreation" type="string">
+      Defines behavior when a CronJob is recreated (detected via UID change).
+      
+      **Validation:** Enum `retain`, `reset`
+      
+      - `retain`: Keep old history
+      - `reset`: Delete history from the old UID
+    </ParamField>
+    
+    <ParamField path="storeLogs" type="boolean">
+      Enables storing job logs in the database. If not set, uses global `--storage.log-storage-enabled` setting.
+    </ParamField>
+    
+    <ParamField path="logRetentionDays" type="integer">
+      How long to keep stored logs. If not set, uses the same value as `retentionDays`.
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+    
+    <ParamField path="maxLogSizeKB" type="integer">
+      Maximum log size to store per execution in KB. If not set, uses global `--storage.max-log-size-kb` setting.
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+    
+    <ParamField path="storeEvents" type="boolean">
+      Enables storing Kubernetes events in the database. If not set, uses global `--storage.event-storage-enabled` setting.
+    </ParamField>
+  </Expandable>
+  
+  ```yaml
+  dataRetention:
+    retentionDays: 60
+    onCronJobDeletion: purge-after-days
+    purgeAfterDays: 7
+    onRecreation: retain
+    storeLogs: true
+    logRetentionDays: 30
+    maxLogSizeKB: 200
+    storeEvents: true
+  ```
+</ParamField>
+
+## Status Fields
+
+The `status` subresource provides real-time monitoring state and metrics.
+
+<ResponseField name="observedGeneration" type="integer">
+  The generation last processed by the controller.
+</ResponseField>
+
+<ResponseField name="phase" type="string">
+  The monitor's operational state.
+  
+  **Values:** `Initializing`, `Active`, `Degraded`, `Error`
+</ResponseField>
+
+<ResponseField name="lastReconcileTime" type="timestamp">
+  When the controller last reconciled this monitor.
+</ResponseField>
+
+<ResponseField name="summary" type="object">
+  Aggregate counts across all monitored CronJobs.
+  
+  <Expandable title="properties">
+    <ResponseField name="totalCronJobs" type="integer">
+      Total number of CronJobs being monitored.
+    </ResponseField>
+    
+    <ResponseField name="healthy" type="integer">
+      Number of healthy CronJobs.
+    </ResponseField>
+    
+    <ResponseField name="warning" type="integer">
+      Number of CronJobs with warnings.
+    </ResponseField>
+    
+    <ResponseField name="critical" type="integer">
+      Number of CronJobs in critical state.
+    </ResponseField>
+    
+    <ResponseField name="suspended" type="integer">
+      Number of suspended CronJobs.
+    </ResponseField>
+    
+    <ResponseField name="running" type="integer">
+      Number of CronJobs with currently running jobs.
+    </ResponseField>
+    
+    <ResponseField name="activeAlerts" type="integer">
+      Total number of active alerts across all CronJobs.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="cronJobs" type="array">
+  Per-CronJob status information.
+  
+  <Expandable title="array item properties">
+    <ResponseField name="name" type="string">
+      CronJob name.
+    </ResponseField>
+    
+    <ResponseField name="namespace" type="string">
+      CronJob namespace.
+    </ResponseField>
+    
+    <ResponseField name="status" type="string">
+      Health status.
+      
+      **Values:** `healthy`, `warning`, `critical`, `suspended`, `unknown`
+    </ResponseField>
+    
+    <ResponseField name="suspended" type="boolean">
+      Whether the CronJob is suspended.
+    </ResponseField>
+    
+    <ResponseField name="lastSuccessfulTime" type="timestamp">
+      When the last Job succeeded.
+    </ResponseField>
+    
+    <ResponseField name="lastFailedTime" type="timestamp">
+      When the last Job failed.
+    </ResponseField>
+    
+    <ResponseField name="lastRunDuration" type="duration">
+      Duration of the last completed Job.
+    </ResponseField>
+    
+    <ResponseField name="nextScheduledTime" type="timestamp">
+      When the next Job will be created.
+    </ResponseField>
+    
+    <ResponseField name="metrics" type="object">
+      SLA metrics for this CronJob.
+      
+      <Expandable title="properties">
+        <ResponseField name="successRate" type="number">
+          Success rate percentage.
+        </ResponseField>
+        
+        <ResponseField name="totalRuns" type="integer">
+          Total number of job runs.
+        </ResponseField>
+        
+        <ResponseField name="successfulRuns" type="integer">
+          Number of successful runs.
+        </ResponseField>
+        
+        <ResponseField name="failedRuns" type="integer">
+          Number of failed runs.
+        </ResponseField>
+        
+        <ResponseField name="avgDurationSeconds" type="number">
+          Average execution duration in seconds.
+        </ResponseField>
+        
+        <ResponseField name="p50DurationSeconds" type="number">
+          50th percentile (median) duration in seconds.
+        </ResponseField>
+        
+        <ResponseField name="p95DurationSeconds" type="number">
+          95th percentile duration in seconds.
+        </ResponseField>
+        
+        <ResponseField name="p99DurationSeconds" type="number">
+          99th percentile duration in seconds.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    
+    <ResponseField name="activeJobs" type="array">
+      Currently running jobs for this CronJob.
+      
+      <Expandable title="array item properties">
+        <ResponseField name="name" type="string">
+          Job name.
+        </ResponseField>
+        
+        <ResponseField name="startTime" type="timestamp">
+          When the job started.
+        </ResponseField>
+        
+        <ResponseField name="runningDuration" type="duration">
+          How long the job has been running.
+        </ResponseField>
+        
+        <ResponseField name="podPhase" type="string">
+          Current pod phase (Pending, Running, etc.).
+        </ResponseField>
+        
+        <ResponseField name="podName" type="string">
+          Name of the pod running the job.
+        </ResponseField>
+        
+        <ResponseField name="ready" type="string">
+          Pod readiness (e.g., "1/1").
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    
+    <ResponseField name="activeAlerts" type="array">
+      Current alerts for this CronJob.
+      
+      <Expandable title="array item properties">
+        <ResponseField name="type" type="string">
+          Alert type (e.g., "JobFailed", "MissedSchedule", "SLABreached").
+        </ResponseField>
+        
+        <ResponseField name="severity" type="string">
+          Alert severity ("critical" or "warning").
+        </ResponseField>
+        
+        <ResponseField name="message" type="string">
+          Human-readable alert description.
+        </ResponseField>
+        
+        <ResponseField name="since" type="timestamp">
+          When the alert became active.
+        </ResponseField>
+        
+        <ResponseField name="lastNotified" type="timestamp">
+          When the alert was last sent to channels.
+        </ResponseField>
+        
+        <ResponseField name="exitCode" type="integer">
+          Container exit code (for JobFailed alerts).
+        </ResponseField>
+        
+        <ResponseField name="reason" type="string">
+          Failure reason (e.g., "OOMKilled", "Error").
+        </ResponseField>
+        
+        <ResponseField name="suggestedFix" type="string">
+          Actionable guidance for resolving the alert.
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="conditions" type="array">
+  Standard Kubernetes condition array. Common condition types:
+  
+  - `Ready`: Monitor is operational and tracking CronJobs
+  - `Progressing`: Monitor is initializing or updating
+  - `Degraded`: Monitor is experiencing issues but operational
+</ResponseField>
+
+## Complete Example
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: full-featured
+  namespace: production
+spec:
+  selector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [critical, high]
+
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    windowDays: 7
+    maxDuration: 30m
+    durationRegressionThreshold: 50
+    durationBaselineWindowDays: 14
+
+  suspendedHandling:
+    pauseMonitoring: true
+    alertIfSuspendedFor: 168h
+
+  maintenanceWindows:
+    - name: weekly-maintenance
+      schedule: "0 2 * * 0"
+      duration: 4h
+      timezone: America/New_York
+      suppressAlerts: true
+
+  alerting:
+    enabled: true
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]
+      - name: slack-ops
+        severities: [critical, warning]
+    severityOverrides:
+      jobFailed: critical
+      slaBreached: warning
+      missedSchedule: warning
+      deadManTriggered: critical
+      durationRegression: warning
+    suppressDuplicatesFor: 1h
+    alertDelay: 5m
+    includeContext:
+      logs: true
+      logLines: 100
+      events: true
+      podStatus: true
+      suggestedFixes: true
+    suggestedFixPatterns:
+      - name: custom-oom
+        match:
+          exitCode: 137
+        suggestion: "OOM killed. Increase memory for {\{.Namespace}\}/{\{.Name}\}"
+        priority: 150
+
+  dataRetention:
+    retentionDays: 60
+    onCronJobDeletion: purge-after-days
+    purgeAfterDays: 7
+    onRecreation: retain
+    storeLogs: true
+    logRetentionDays: 30
+    maxLogSizeKB: 200
+    storeEvents: true
+```

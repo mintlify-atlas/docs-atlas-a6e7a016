@@ -1,0 +1,609 @@
+---
+title: Prometheus Metrics
+description: Prometheus metrics exported by CronJob Guardian and Grafana dashboard integration
+---
+
+## Overview
+
+CronJob Guardian exports Prometheus metrics for monitoring CronJob health, alert delivery, and operator performance. The metrics endpoint is served on port 8443 (HTTPS) by default.
+
+## Metrics Endpoint
+
+**Default address:** `https://<pod-ip>:8443/metrics`
+
+**Configuration:**
+
+```yaml
+metrics:
+  bind-address: ":8443"
+  secure: true  # HTTPS enabled
+```
+
+**Health check:**
+
+```bash
+# From within cluster
+curl -k https://cronjob-guardian:8443/metrics
+
+# With authentication (when secure: true)
+curl -k -H "Authorization: Bearer $(kubectl create token prometheus)" \
+  https://cronjob-guardian:8443/metrics
+```
+
+## Exported Metrics
+
+All metrics are defined in `internal/metrics/metrics.go`.
+
+### CronJob Success Rate
+
+**Metric:** `cronjob_guardian_success_rate`
+
+**Type:** Gauge
+
+**Description:** Success rate of monitored CronJobs (0-100)
+
+**Labels:**
+- `namespace` - CronJob namespace
+- `cronjob` - CronJob name
+- `monitor` - CronJobMonitor name
+
+**Example:**
+```
+cronjob_guardian_success_rate{namespace="default",cronjob="backup-job",monitor="all-jobs"} 98.5
+```
+
+**Updated by:** SLA Recalculation Scheduler (every 5 minutes)
+
+### CronJob Duration
+
+**Metric:** `cronjob_guardian_duration_seconds`
+
+**Type:** Gauge
+
+**Description:** Duration metrics for monitored CronJobs at different percentiles
+
+**Labels:**
+- `namespace` - CronJob namespace
+- `cronjob` - CronJob name
+- `percentile` - Duration percentile: `avg`, `p50`, `p95`, `p99`
+
+**Example:**
+```
+cronjob_guardian_duration_seconds{namespace="default",cronjob="backup-job",percentile="p50"} 120.5
+cronjob_guardian_duration_seconds{namespace="default",cronjob="backup-job",percentile="p95"} 180.2
+cronjob_guardian_duration_seconds{namespace="default",cronjob="backup-job",percentile="p99"} 240.8
+cronjob_guardian_duration_seconds{namespace="default",cronjob="backup-job",percentile="avg"} 135.3
+```
+
+**Updated by:** SLA Recalculation Scheduler (every 5 minutes)
+
+### Alerts Total
+
+**Metric:** `cronjob_guardian_alerts_total`
+
+**Type:** Counter
+
+**Description:** Total number of alerts successfully sent
+
+**Labels:**
+- `namespace` - CronJob namespace
+- `cronjob` - CronJob name
+- `type` - Alert type: `JobFailed`, `SLABreached`, `DeadManSwitch`, `DurationRegression`, `JobSuspended`
+- `severity` - Alert severity: `critical`, `warning`, `info`
+- `channel` - Alert channel name (e.g., `slack-alerts`, `pagerduty-oncall`)
+
+**Example:**
+```
+cronjob_guardian_alerts_total{namespace="default",cronjob="backup-job",type="JobFailed",severity="critical",channel="slack-alerts"} 3
+```
+
+**Incremented by:** Alert Dispatcher on successful alert delivery
+
+### Alerts Failed Total
+
+**Metric:** `cronjob_guardian_alerts_failed_total`
+
+**Type:** Counter
+
+**Description:** Total number of alerts that failed to send
+
+**Labels:**
+- `namespace` - CronJob namespace
+- `cronjob` - CronJob name
+- `type` - Alert type
+- `severity` - Alert severity
+- `channel` - Alert channel name
+
+**Example:**
+```
+cronjob_guardian_alerts_failed_total{namespace="default",cronjob="backup-job",type="JobFailed",severity="critical",channel="pagerduty-oncall"} 1
+```
+
+**Incremented by:** Alert Dispatcher on alert delivery failure
+
+### Executions Total
+
+**Metric:** `cronjob_guardian_executions_total`
+
+**Type:** Counter
+
+**Description:** Total number of job executions recorded
+
+**Labels:**
+- `namespace` - CronJob namespace
+- `cronjob` - CronJob name
+- `status` - Execution status: `success`, `failure`
+
+**Example:**
+```
+cronjob_guardian_executions_total{namespace="default",cronjob="backup-job",status="success"} 287
+cronjob_guardian_executions_total{namespace="default",cronjob="backup-job",status="failure"} 4
+```
+
+**Incremented by:** Job Controller on job completion
+
+### Active Alerts
+
+**Metric:** `cronjob_guardian_active_alerts`
+
+**Type:** Gauge
+
+**Description:** Number of currently active (unresolved) alerts
+
+**Labels:**
+- `namespace` - CronJob namespace
+- `cronjob` - CronJob name
+- `severity` - Alert severity
+
+**Example:**
+```
+cronjob_guardian_active_alerts{namespace="default",cronjob="backup-job",severity="critical"} 1
+cronjob_guardian_active_alerts{namespace="default",cronjob="backup-job",severity="warning"} 0
+```
+
+**Updated by:** Controllers when alerts are triggered or resolved
+
+## Controller-Runtime Metrics
+
+The operator also exports standard controller-runtime metrics:
+
+### Controller Reconciliation Metrics
+
+- `controller_runtime_reconcile_total` - Total reconciliations per controller
+- `controller_runtime_reconcile_errors_total` - Failed reconciliations
+- `controller_runtime_reconcile_time_seconds` - Reconciliation duration histogram
+
+**Labels:**
+- `controller` - Controller name: `CronJobMonitor`, `AlertChannel`, `JobHandler`
+- `result` - Result: `success`, `error`, `requeue`
+
+### Workqueue Metrics
+
+- `workqueue_depth` - Current depth of workqueue
+- `workqueue_adds_total` - Total number of adds to workqueue
+- `workqueue_queue_duration_seconds` - Time spent in queue
+- `workqueue_work_duration_seconds` - Time spent processing items
+
+**Labels:**
+- `name` - Workqueue name (controller name)
+
+### Go Runtime Metrics
+
+- `go_goroutines` - Number of goroutines
+- `go_memstats_alloc_bytes` - Allocated memory
+- `go_memstats_heap_inuse_bytes` - Heap memory in use
+- `go_gc_duration_seconds` - GC pause duration
+
+## ServiceMonitor Configuration
+
+For Prometheus Operator, use a ServiceMonitor resource:
+
+**File:** `config/prometheus/monitor.yaml`
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: cronjob-guardian-metrics
+  namespace: cronjob-guardian
+  labels:
+    app.kubernetes.io/name: cronjob-guardian
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cronjob-guardian
+      control-plane: controller-manager
+  endpoints:
+    - port: https
+      path: /metrics
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true  # Use cert-manager in production
+  namespaceSelector:
+    matchNames:
+      - cronjob-guardian
+```
+
+**Enable via Helm:**
+
+```yaml
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    prometheus: kube-prometheus  # Match your Prometheus selector
+```
+
+### TLS Certificate Setup (Production)
+
+For production, use cert-manager to manage metrics TLS certificates:
+
+1. **Install cert-manager:**
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.0/cert-manager.yaml
+```
+
+2. **Create Certificate:**
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cronjob-guardian-metrics-cert
+  namespace: cronjob-guardian
+spec:
+  secretName: metrics-server-cert
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+  dnsNames:
+    - cronjob-guardian-metrics.cronjob-guardian.svc
+    - cronjob-guardian-metrics.cronjob-guardian.svc.cluster.local
+```
+
+3. **Configure operator:**
+
+```yaml
+metrics:
+  certPath: /etc/guardian/certs
+  certName: tls.crt
+  certKey: tls.key
+```
+
+4. **Update ServiceMonitor:**
+
+```yaml
+spec:
+  endpoints:
+    - port: https
+      tlsConfig:
+        ca:
+          secret:
+            name: metrics-server-cert
+            key: ca.crt
+        serverName: cronjob-guardian-metrics.cronjob-guardian.svc
+```
+
+## Grafana Dashboard
+
+A pre-built Grafana dashboard is available for visualizing CronJob Guardian metrics.
+
+### Dashboard Features
+
+**Overview Panel:**
+- Total monitored CronJobs
+- Overall success rate
+- Active alerts count
+- Alert delivery success rate
+
+**CronJob Health:**
+- Success rate by CronJob (time series)
+- Execution count by status (stacked bar)
+- Duration percentiles (P50, P95, P99)
+- Recent failures table
+
+**Alerting:**
+- Alerts sent by type and severity
+- Alert delivery failures by channel
+- Active alerts by CronJob
+- Alert rate over time
+
+**Performance:**
+- Controller reconciliation rate
+- Reconciliation errors
+- Workqueue depth
+- Memory and CPU usage
+
+### Import Dashboard
+
+**Dashboard JSON:** Available in repository at `deploy/grafana/dashboard.json` (coming soon)
+
+**Import steps:**
+1. Open Grafana
+2. Navigate to **Dashboards** > **Import**
+3. Upload JSON file or paste JSON content
+4. Select Prometheus data source
+5. Click **Import**
+
+### Example Queries
+
+**CronJob success rate over time:**
+```promql
+cronjob_guardian_success_rate{namespace="production"}
+```
+
+**Total failures in last 24h:**
+```promql
+increase(cronjob_guardian_executions_total{status="failure"}[24h])
+```
+
+**P95 duration by CronJob:**
+```promql
+cronjob_guardian_duration_seconds{percentile="p95"}
+```
+
+**Alert delivery success rate:**
+```promql
+sum(rate(cronjob_guardian_alerts_total[5m])) / 
+(sum(rate(cronjob_guardian_alerts_total[5m])) + 
+ sum(rate(cronjob_guardian_alerts_failed_total[5m]))) * 100
+```
+
+**Active critical alerts:**
+```promql
+cronjob_guardian_active_alerts{severity="critical"}
+```
+
+## Alerting Rules
+
+Recommended Prometheus alerting rules:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cronjob-guardian-alerts
+  namespace: cronjob-guardian
+spec:
+  groups:
+    - name: cronjob-guardian
+      interval: 30s
+      rules:
+        # Alert when success rate drops below 95%
+        - alert: CronJobLowSuccessRate
+          expr: cronjob_guardian_success_rate < 95
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "CronJob {\{ $labels.cronjob }\} has low success rate"
+            description: "Success rate is {\{ $value }\}% (threshold: 95%)"
+
+        # Alert when success rate drops below 80%
+        - alert: CronJobCriticalSuccessRate
+          expr: cronjob_guardian_success_rate < 80
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CronJob {\{ $labels.cronjob }\} has critical success rate"
+            description: "Success rate is {\{ $value }\}% (threshold: 80%)"
+
+        # Alert on alert delivery failures
+        - alert: AlertDeliveryFailures
+          expr: rate(cronjob_guardian_alerts_failed_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Alert delivery failures detected on channel {\{ $labels.channel }\}"
+            description: "Failing at {\{ $value }\} alerts/sec"
+
+        # Alert when operator is down
+        - alert: CronJobGuardianDown
+          expr: up{job="cronjob-guardian"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "CronJob Guardian is down"
+            description: "The CronJob Guardian operator is not responding"
+
+        # Alert on high reconciliation errors
+        - alert: HighReconciliationErrors
+          expr: rate(controller_runtime_reconcile_errors_total[5m]) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High reconciliation error rate in {\{ $labels.controller }\}"
+            description: "Error rate: {\{ $value }\} errors/sec"
+```
+
+## Authentication and Authorization
+
+When `metrics.secure: true`, the metrics endpoint requires authentication.
+
+### Token Authentication
+
+Prometheus must provide a service account token:
+
+```yaml
+# prometheus-rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cronjob-guardian-metrics-reader
+rules:
+  - nonResourceURLs:
+      - /metrics
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-metrics-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cronjob-guardian-metrics-reader
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+```
+
+**Prometheus configuration:**
+
+```yaml
+scrape_configs:
+  - job_name: 'cronjob-guardian'
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names:
+            - cronjob-guardian
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true  # Use CA cert in production
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_name]
+        action: keep
+        regex: cronjob-guardian-metrics
+```
+
+### Disable Authentication (Development)
+
+For development clusters, you can disable authentication:
+
+```yaml
+metrics:
+  bind-address: ":8080"
+  secure: false  # HTTP without authentication
+```
+
+**Warning:** Only use in trusted environments. Metrics may contain sensitive information.
+
+## Network Policies
+
+Restrict metrics endpoint access using NetworkPolicies:
+
+**File:** `config/network-policy/allow-metrics-traffic.yaml`
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-traffic
+  namespace: cronjob-guardian
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cronjob-guardian
+  policyTypes:
+    - Ingress
+  ingress:
+    # Allow from Prometheus namespace
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            metrics: enabled  # Label your monitoring namespace
+      ports:
+        - port: 8443
+          protocol: TCP
+```
+
+**Label monitoring namespace:**
+
+```bash
+kubectl label namespace monitoring metrics=enabled
+```
+
+## Troubleshooting
+
+### Metrics endpoint not accessible
+
+**Check if metrics are enabled:**
+
+```bash
+kubectl exec -n cronjob-guardian deploy/cronjob-guardian -- \
+  wget -O- http://localhost:8081/readyz
+```
+
+**Test metrics endpoint:**
+
+```bash
+# Port-forward to local machine
+kubectl port-forward -n cronjob-guardian deploy/cronjob-guardian 8443:8443
+
+# Access metrics (skip TLS verification for testing)
+curl -k https://localhost:8443/metrics
+```
+
+### Authentication failures
+
+**Check RBAC:**
+
+```bash
+# Verify ClusterRole exists
+kubectl get clusterrole metrics-auth-role
+
+# Check if Prometheus SA has permissions
+kubectl auth can-i get /metrics --as=system:serviceaccount:monitoring:prometheus
+```
+
+### Missing metrics
+
+**Verify controllers are running:**
+
+```bash
+kubectl logs -n cronjob-guardian deploy/cronjob-guardian | grep "controller"
+```
+
+**Check if CronJobs are being monitored:**
+
+```bash
+kubectl get cronjobmonitors -A
+```
+
+**Metrics only update on schedule:**
+- Success rates update every 5 minutes (SLA scheduler)
+- Execution counts update on job completion
+- Alert metrics update when alerts are sent
+
+### High cardinality
+
+**Problem:** Too many unique label combinations cause high memory usage.
+
+**Solution:** 
+- Limit number of monitored CronJobs
+- Use namespace selectors to reduce scope
+- Aggregate metrics in queries instead of labels
+
+**Check metric cardinality:**
+
+```promql
+count by (__name__) ({__name__=~"cronjob_guardian.*"})
+```
+
+## Best Practices
+
+1. **Enable ServiceMonitor** - Use Prometheus Operator for automatic discovery
+2. **Use TLS certificates** - Secure metrics endpoint with cert-manager
+3. **Set up alerting rules** - Alert on low success rates and delivery failures
+4. **Monitor operator health** - Track reconciliation errors and resource usage
+5. **Create dashboards** - Visualize CronJob health and alert trends
+6. **Network policies** - Restrict metrics access to monitoring namespace
+7. **Retention policies** - Configure appropriate Prometheus retention
+8. **High availability** - Monitor from multiple Prometheus instances

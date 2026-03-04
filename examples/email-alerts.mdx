@@ -1,0 +1,752 @@
+---
+title: "Email Alert Integration"
+description: "Configure SMTP email notifications for CronJob failures and alerts"
+---
+
+## Overview
+
+Email alerts provide a traditional and widely-supported notification channel for CronJob Guardian. Email is useful for:
+
+- Teams that don't use Slack or other chat platforms
+- Compliance and audit requirements
+- Distribution lists and mailing lists
+- Non-technical stakeholders who need notifications
+- Long-term alert archival
+
+## Quick Start
+
+<Steps>
+  <Step title="Get SMTP credentials">
+    Gather your SMTP server details:
+    - SMTP host (e.g., `smtp.gmail.com`)
+    - SMTP port (typically 587 for TLS, 465 for SSL)
+    - Username/email address
+    - Password or app-specific password
+  </Step>
+
+  <Step title="Create Kubernetes Secret">
+    Store SMTP credentials in a secret:
+
+    ```bash
+    kubectl create secret generic smtp-credentials \
+      --namespace cronjob-guardian \
+      --from-literal=host=smtp.gmail.com \
+      --from-literal=port=587 \
+      --from-literal=username=alerts@example.com \
+      --from-literal=password=your-app-password
+    ```
+  </Step>
+
+  <Step title="Create Email AlertChannel">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: email-team
+    spec:
+      type: email
+      email:
+        smtpSecretRef:
+          name: smtp-credentials
+          namespace: cronjob-guardian
+        from: guardian@example.com
+        to:
+          - ops-team@example.com
+          - oncall@example.com
+    EOF
+    ```
+  </Step>
+
+  <Step title="Reference in CronJobMonitor">
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: CronJobMonitor
+    metadata:
+      name: critical-jobs
+      namespace: production
+    spec:
+      selector:
+        matchLabels:
+          tier: critical
+      alerting:
+        channelRefs:
+          - name: email-team
+    ```
+  </Step>
+</Steps>
+
+## Basic Email AlertChannel
+
+Here's the example from the repository:
+
+```yaml alertchannels/email.yaml
+# Email AlertChannel
+# Sends alerts via SMTP email
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-team
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: guardian@example.com
+    to:
+      - ops-team@example.com
+      - oncall@example.com
+```
+
+### Configuration Options
+
+<ResponseField name="email.smtpSecretRef" type="object" required>
+  Reference to a Kubernetes Secret containing SMTP credentials
+  
+  The secret must contain keys:
+  - `host`: SMTP server hostname
+  - `port`: SMTP server port
+  - `username`: SMTP authentication username
+  - `password`: SMTP authentication password
+  
+  <Expandable title="properties">
+    <ResponseField name="name" type="string" required>
+      Name of the Secret
+    </ResponseField>
+    <ResponseField name="namespace" type="string" required>
+      Namespace where the Secret exists
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="email.from" type="string" required>
+  Sender email address (e.g., `guardian@example.com`)
+  
+  This address appears in the "From" field of alert emails.
+</ResponseField>
+
+<ResponseField name="email.to" type="array" required>
+  List of recipient email addresses
+  
+  All recipients receive every alert sent to this channel.
+</ResponseField>
+
+<ResponseField name="email.cc" type="array">
+  List of CC recipient email addresses (optional)
+</ResponseField>
+
+<ResponseField name="email.bcc" type="array">
+  List of BCC recipient email addresses (optional)
+</ResponseField>
+
+## Common SMTP Providers
+
+### Gmail
+
+```bash
+# Create Gmail SMTP secret
+kubectl create secret generic smtp-gmail \
+  --namespace cronjob-guardian \
+  --from-literal=host=smtp.gmail.com \
+  --from-literal=port=587 \
+  --from-literal=username=your-email@gmail.com \
+  --from-literal=password=your-app-password
+```
+
+<Note>
+  Gmail requires an **App Password**, not your regular password. Generate one at [Google Account Settings](https://myaccount.google.com/apppasswords).
+</Note>
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-gmail
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-gmail
+      namespace: cronjob-guardian
+    from: your-email@gmail.com
+    to:
+      - team@example.com
+```
+
+### Office 365 / Outlook
+
+```bash
+# Create Office 365 SMTP secret
+kubectl create secret generic smtp-office365 \
+  --namespace cronjob-guardian \
+  --from-literal=host=smtp.office365.com \
+  --from-literal=port=587 \
+  --from-literal=username=your-email@company.com \
+  --from-literal=password=your-password
+```
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-office365
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-office365
+      namespace: cronjob-guardian
+    from: alerts@company.com
+    to:
+      - ops@company.com
+```
+
+### Amazon SES
+
+```bash
+# Create SES SMTP secret
+kubectl create secret generic smtp-ses \
+  --namespace cronjob-guardian \
+  --from-literal=host=email-smtp.us-east-1.amazonaws.com \
+  --from-literal=port=587 \
+  --from-literal=username=YOUR-SES-SMTP-USERNAME \
+  --from-literal=password=YOUR-SES-SMTP-PASSWORD
+```
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-ses
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-ses
+      namespace: cronjob-guardian
+    from: alerts@yourdomain.com  # Must be verified in SES
+    to:
+      - team@yourdomain.com
+```
+
+### SendGrid
+
+```bash
+# Create SendGrid SMTP secret
+kubectl create secret generic smtp-sendgrid \
+  --namespace cronjob-guardian \
+  --from-literal=host=smtp.sendgrid.net \
+  --from-literal=port=587 \
+  --from-literal=username=apikey \
+  --from-literal=password=YOUR-SENDGRID-API-KEY
+```
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-sendgrid
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-sendgrid
+      namespace: cronjob-guardian
+    from: noreply@yourdomain.com
+    to:
+      - alerts@yourdomain.com
+```
+
+### Generic SMTP Server
+
+```bash
+# Create custom SMTP secret
+kubectl create secret generic smtp-custom \
+  --namespace cronjob-guardian \
+  --from-literal=host=mail.example.com \
+  --from-literal=port=587 \
+  --from-literal=username=alerts \
+  --from-literal=password=smtp-password
+```
+
+## Multiple Email Lists
+
+Create separate AlertChannels for different teams or alert types:
+
+<CodeGroup>
+```yaml Operations Team
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-ops
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: cronjob-guardian@example.com
+    to:
+      - ops-team@example.com
+      - platform-lead@example.com
+```
+
+```yaml DBA Team
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-dba
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: cronjob-guardian@example.com
+    to:
+      - dba-team@example.com
+      - database-oncall@example.com
+```
+
+```yaml Management (CC Only)
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-management
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: cronjob-guardian@example.com
+    to:
+      - ops-team@example.com
+    cc:
+      - engineering-manager@example.com
+      - cto@example.com
+```
+</CodeGroup>
+
+## Email Alert Format
+
+Email alerts include structured information:
+
+**Subject:**
+```
+[CRITICAL] CronJob Failed: production/daily-backup
+```
+
+**Body:**
+```
+CronJob Failure Alert
+
+Job Details:
+- Name: daily-backup
+- Namespace: production
+- Execution: job-daily-backup-28501234
+- Time: 2026-03-04 08:15:23 UTC
+- Duration: 5m 32s
+- Exit Code: 1
+
+Error Details:
+Exit Code: 1
+Reason: Error
+
+Recent Logs (last 50 lines):
+----------------------------------------
+Error: Failed to connect to database
+Connection timeout after 30s
+Host: postgres.production.svc.cluster.local:5432
+...
+
+Kubernetes Events:
+----------------------------------------
+[Warning] BackoffLimitExceeded: Job has reached the specified backoff limit
+
+Suggested Fix:
+----------------------------------------
+Database connection failed. Check:
+1. Database pod is running: kubectl get pods -n production -l app=postgres
+2. Service is healthy: kubectl get svc postgres -n production
+3. Network policies allow connection from this namespace
+
+Monitor: database-backups (namespace: databases)
+Dashboard: https://guardian.example.com/jobs/production/daily-backup
+
+---
+Sent by CronJob Guardian
+```
+
+### Customizing Email Content
+
+Control what appears in emails via the CronJobMonitor:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: detailed-emails
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  alerting:
+    channelRefs:
+      - name: email-team
+    
+    # Customize email content
+    includeContext:
+      logs: true              # Include pod logs
+      logLines: 100           # Number of log lines
+      events: true            # Include Kubernetes events
+      podStatus: true         # Include pod status details
+      suggestedFixes: true    # Include fix suggestions
+```
+
+## Routing by Severity
+
+Send critical alerts to one list, warnings to another:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: tiered-emails
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 95
+  alerting:
+    channelRefs:
+      # Critical alerts to on-call list
+      - name: email-oncall
+        severities: [critical]
+      
+      # All alerts to ops team
+      - name: email-ops
+        severities: [critical, warning]
+```
+
+## Testing Email Integration
+
+<Steps>
+  <Step title="Verify SMTP credentials">
+    Test SMTP connectivity from within the cluster:
+
+    ```bash
+    kubectl run -it --rm smtp-test --image=nicolaka/netshoot --restart=Never -- bash
+    
+    # Inside the pod
+    telnet smtp.gmail.com 587
+    # Should connect successfully
+    ```
+  </Step>
+
+  <Step title="Verify AlertChannel status">
+    ```bash
+    kubectl get alertchannel email-team
+    kubectl describe alertchannel email-team
+    ```
+
+    Look for:
+    ```yaml
+    Status:
+      Conditions:
+        - Type: Ready
+          Status: True
+          Message: SMTP configured successfully
+    ```
+  </Step>
+
+  <Step title="Create a test failing job">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: test-email-alert
+      namespace: production
+      labels:
+        tier: critical
+    spec:
+      schedule: "*/5 * * * *"
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: test
+                  image: busybox
+                  command: ["sh", "-c", "echo 'Testing email alert' && exit 1"]
+              restartPolicy: Never
+    EOF
+    ```
+  </Step>
+
+  <Step title="Wait for email">
+    After the job fails, check your inbox for the alert email.
+
+    If no email arrives, check:
+    ```bash
+    # Controller logs
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller-manager | grep -i email
+    
+    # AlertChannel status
+    kubectl get alertchannel email-team -o yaml
+    ```
+  </Step>
+
+  <Step title="Clean up">
+    ```bash
+    kubectl delete cronjob test-email-alert -n production
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No emails being sent">
+    **Check SMTP credentials:**
+    ```bash
+    kubectl get secret smtp-credentials -n cronjob-guardian -o yaml
+    ```
+
+    Decode and verify the values:
+    ```bash
+    kubectl get secret smtp-credentials -n cronjob-guardian -o jsonpath='{.data.host}' | base64 -d
+    kubectl get secret smtp-credentials -n cronjob-guardian -o jsonpath='{.data.port}' | base64 -d
+    kubectl get secret smtp-credentials -n cronjob-guardian -o jsonpath='{.data.username}' | base64 -d
+    ```
+
+    **Test SMTP connectivity:**
+    ```bash
+    kubectl run -it --rm smtp-test --image=nicolaka/netshoot --restart=Never -- \
+      curl -v --url "smtp://smtp.gmail.com:587" \
+      --mail-from "sender@example.com" \
+      --mail-rcpt "recipient@example.com"
+    ```
+
+    **Check controller logs:**
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller-manager | grep -i smtp
+    ```
+  </Accordion>
+
+  <Accordion title="Authentication failed">
+    Common causes:
+
+    **Gmail: Using regular password instead of App Password**
+    - Go to [Google Account Settings](https://myaccount.google.com/apppasswords)
+    - Generate an App Password
+    - Update the secret with the App Password
+
+    **Office 365: MFA required**
+    - If MFA is enabled, you may need an app-specific password
+    - Or configure OAuth2 (requires additional setup)
+
+    **Wrong username format**
+    - Some providers require full email (e.g., `user@domain.com`)
+    - Others require just username (e.g., `user`)
+    - Check your provider's documentation
+
+    **Update the secret:**
+    ```bash
+    kubectl create secret generic smtp-credentials \
+      --namespace cronjob-guardian \
+      --from-literal=host=smtp.gmail.com \
+      --from-literal=port=587 \
+      --from-literal=username=correct@email.com \
+      --from-literal=password=correct-password \
+      --dry-run=client -o yaml | kubectl apply -f -
+    ```
+  </Accordion>
+
+  <Accordion title="Emails marked as spam">
+    To improve deliverability:
+
+    **Use a verified domain:**
+    - Send from a domain you control
+    - Configure SPF, DKIM, and DMARC records
+    - Use services like SendGrid or SES for better reputation
+
+    **Avoid spam triggers:**
+    - Use clear, non-promotional subject lines
+    - Include unsubscribe instructions (if applicable)
+    - Maintain consistent sender addresses
+
+    **Test with spam checkers:**
+    - [Mail Tester](https://www.mail-tester.com/)
+    - Check your domain's reputation
+  </Accordion>
+
+  <Accordion title="Wrong port or TLS errors">
+    Common SMTP ports:
+    - **587**: STARTTLS (most common)
+    - **465**: SSL/TLS (implicit)
+    - **25**: Plain text (rarely used, often blocked)
+
+    If you get TLS errors, verify:
+    ```bash
+    # Test TLS connection
+    openssl s_client -connect smtp.gmail.com:587 -starttls smtp
+    ```
+
+    Update port in secret if needed:
+    ```bash
+    kubectl patch secret smtp-credentials -n cronjob-guardian \
+      --type merge \
+      -p '{"data":{"port":"NTg3"}}' # 587 in base64
+    ```
+  </Accordion>
+
+  <Accordion title="Too many emails">
+    **Enable rate limiting:**
+    CronJob Guardian doesn't have built-in rate limiting for email, but you can:
+
+    **Use alert suppression in monitors:**
+    ```yaml
+    alerting:
+      suppressDuplicatesFor: 1h
+      alertDelay: 5m
+    ```
+
+    **Filter by severity:**
+    ```yaml
+    channelRefs:
+      - name: email-team
+        severities: [critical]  # Only critical, no warnings
+    ```
+
+    **Use digest emails:**
+    Consider configuring your email provider or a proxy to batch alerts into digest emails.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Service Accounts" icon="user-gear">
+    Create dedicated email accounts for alerts (e.g., `cronjob-alerts@company.com`) rather than personal emails.
+  </Card>
+  
+  <Card title="Separate by Team" icon="users">
+    Create one AlertChannel per team with their own distribution list for clear ownership.
+  </Card>
+  
+  <Card title="Use Mailing Lists" icon="list">
+    Send to mailing lists/groups (e.g., `ops-team@company.com`) instead of individual addresses for easier management.
+  </Card>
+  
+  <Card title="Include Context" icon="info-circle">
+    Set `includeContext.logs: true` to provide debugging information directly in emails.
+  </Card>
+  
+  <Card title="Clear Subject Lines" icon="heading">
+    Email subjects include severity and job name for easy filtering and prioritization.
+  </Card>
+  
+  <Card title="Backup Channel" icon="shield">
+    Use email as a backup to Slack/PagerDuty in case primary channels are down.
+  </Card>
+</CardGroup>
+
+## Email Filtering Rules
+
+Set up filters in your email client to organize alerts:
+
+### Gmail Filters
+
+```
+From: guardian@example.com
+Subject: [CRITICAL]
+→ Apply label: CronJob/Critical
+→ Mark as important
+→ Never send to spam
+```
+
+```
+From: guardian@example.com
+Subject: [WARNING]
+→ Apply label: CronJob/Warning
+→ Skip inbox (archive)
+```
+
+### Outlook Rules
+
+```
+From: guardian@example.com
+AND Subject contains: CRITICAL
+→ Move to folder: Alerts/Critical
+→ Mark as important
+```
+
+### Thunderbird Filters
+
+```
+From contains: guardian@example.com
+AND Subject contains: Failed
+→ Tag as: Alert
+→ Move to: Alerts folder
+```
+
+## Combining Email with Other Channels
+
+Email works best in combination with other alert channels:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: multi-channel
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  alerting:
+    channelRefs:
+      # Immediate notification
+      - name: pagerduty-oncall
+        severities: [critical]
+      
+      # Team chat
+      - name: slack-ops
+        severities: [critical, warning]
+      
+      # Email for record-keeping
+      - name: email-ops
+        severities: [critical, warning]
+```
+
+This provides:
+- **PagerDuty**: Immediate on-call escalation
+- **Slack**: Real-time team awareness and collaboration
+- **Email**: Permanent record and distribution to non-technical stakeholders
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Slack Alerts" icon="slack" href="/examples/slack-alerts">
+    Set up Slack notifications
+  </Card>
+  <Card title="PagerDuty Alerts" icon="bullhorn" href="/examples/pagerduty-alerts">
+    Configure on-call escalation
+  </Card>
+  <Card title="Webhook Alerts" icon="webhook" href="/examples/webhook-alerts">
+    Integrate with custom systems
+  </Card>
+  <Card title="Alert Channels Reference" icon="book" href="/api/alertchannel">
+    Complete API documentation
+  </Card>
+</CardGroup>

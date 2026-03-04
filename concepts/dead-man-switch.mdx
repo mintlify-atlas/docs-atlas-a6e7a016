@@ -1,0 +1,410 @@
+---
+title: Dead-Man's Switch
+description: Detect and alert on missed CronJob schedules before they become incidents
+---
+
+## Overview
+
+A dead-man's switch is a safety mechanism that triggers an alert when an expected event **doesn't happen**. For CronJobs, this means alerting when a job fails to run on its schedule.
+
+<Info>
+  Traditional monitoring waits for failures. Dead-man's switch monitoring detects **absence** of success, catching:
+  - Misconfigured schedules
+  - Resource quota exhaustion preventing job creation
+  - Controller or cluster issues
+  - Accidentally suspended CronJobs
+</Info>
+
+## How It Works
+
+The dead-man's switch analyzer checks if enough time has elapsed since the last successful job execution:
+
+```go
+// From internal/analyzer/sla.go:161-250
+func (a *analyzer) CheckDeadManSwitch(ctx context.Context, 
+    cronJob *batchv1.CronJob, 
+    config *v1alpha1.DeadManSwitchConfig) (*DeadManResult, error)
+```
+
+<Steps>
+  <Step title="Fetch Last Execution">
+    Query the database for the last successful execution of the CronJob:
+    
+    ```go
+    lastSuccess, _ := a.store.GetLastSuccessfulExecution(ctx, cronJobNN)
+    if lastSuccess != nil {
+        result.TimeSinceSuccess = time.Since(lastSuccess.CompletionTime)
+    }
+    ```
+  </Step>
+  
+  <Step title="Calculate Expected Interval">
+    Determine how often the job should run, either from:
+    - **Fixed interval**: `maxTimeSinceLastSuccess` (e.g., `25h` for daily jobs)
+    - **Auto-detected**: Parse cron schedule and add buffer
+    
+    ```go
+    if config.AutoFromSchedule != nil && config.AutoFromSchedule.Enabled {
+        interval, _ := parseScheduleInterval(cronJob.Spec.Schedule)
+        buffer := config.AutoFromSchedule.Buffer  // Default: 1h
+        expectedInterval = interval + buffer
+    }
+    ```
+  </Step>
+  
+  <Step title="Calculate Missed Schedules">
+    Count how many scheduled runs were missed:
+    
+    ```go
+    missedCount := int32(timeSinceLastRun / expectedInterval)
+    threshold := config.AutoFromSchedule.MissedScheduleThreshold  // Default: 1
+    
+    if missedCount >= threshold {
+        result.Triggered = true
+    }
+    ```
+  </Step>
+  
+  <Step title="Dispatch Alert">
+    If triggered, create an alert with severity `critical` (configurable via `severityOverrides`):
+    
+    ```yaml
+    type: DeadManTriggered
+    severity: critical
+    message: "No jobs have run for 26h. Missed 1 scheduled run(s)"
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+### Fixed Interval
+
+Specify a fixed time window:
+
+```yaml
+deadManSwitch:
+  enabled: true
+  maxTimeSinceLastSuccess: 25h
+```
+
+<ParamField path="maxTimeSinceLastSuccess" type="duration">
+  Alert if no successful execution within this duration.
+  
+  **Choosing the right value:**
+  - For daily jobs (`0 0 * * *`): Use `25h` (24h schedule + 1h buffer)
+  - For hourly jobs (`0 * * * *`): Use `75m` (60m schedule + 15m buffer)
+  - For weekly jobs (`0 0 * * 0`): Use `169h` (168h schedule + 1h buffer)
+</ParamField>
+
+<Tip>
+  Always add a buffer to account for execution time and scheduling jitter. Kubernetes doesn't guarantee exact schedule timing.
+</Tip>
+
+### Auto-Detection from Schedule
+
+Automatically parse the cron schedule:
+
+```yaml
+deadManSwitch:
+  enabled: true
+  autoFromSchedule:
+    enabled: true
+    buffer: 1h
+    missedScheduleThreshold: 2
+```
+
+<ParamField path="autoFromSchedule.enabled" type="bool">
+  Enable auto-detection from the CronJob's `schedule` field.
+</ParamField>
+
+<ParamField path="autoFromSchedule.buffer" type="duration" default="1h">
+  Extra time added to the detected interval.
+  
+  For a daily job (`0 0 * * *`), the detected interval is `24h`. With a `1h` buffer, the total expected interval is `25h`.
+</ParamField>
+
+<ParamField path="autoFromSchedule.missedScheduleThreshold" type="int32" default="1">
+  Number of missed schedules before alerting.
+  
+  Set to `2` to allow one missed run (useful for flaky jobs):
+  ```yaml
+  missedScheduleThreshold: 2  # Alert only after 2 consecutive misses
+  ```
+</ParamField>
+
+### Schedule Parsing
+
+The analyzer parses cron expressions using the standard 5-field format:
+
+```
+┌───────────── minute (0 - 59)
+│ ┌───────────── hour (0 - 23)
+│ │ ┌───────────── day of month (1 - 31)
+│ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ ┌───────────── day of week (0 - 6) (Sunday=0)
+│ │ │ │ │
+* * * * *
+```
+
+<CodeGroup>
+```yaml Daily at midnight
+schedule: "0 0 * * *"
+autoFromSchedule:
+  enabled: true
+  buffer: 1h
+# Interval: 24h, Expected: 25h
+```
+
+```yaml Every 6 hours
+schedule: "0 */6 * * *"
+autoFromSchedule:
+  enabled: true
+  buffer: 30m
+# Interval: 6h, Expected: 6h30m
+```
+
+```yaml Weekly on Sunday
+schedule: "0 0 * * 0"
+autoFromSchedule:
+  enabled: true
+  buffer: 2h
+# Interval: 168h (7 days), Expected: 170h
+```
+</CodeGroup>
+
+<Warning>
+  Auto-detection may produce incorrect intervals for:
+  - Irregular schedules (e.g., `0 0 1,15 * *` - 1st and 15th of month)
+  - Timezone-specific schedules with DST transitions
+  - Very complex cron expressions
+  
+  For these cases, use `maxTimeSinceLastSuccess` with a manually calculated interval.
+</Warning>
+
+## Caching
+
+Schedule parsing is expensive. The analyzer uses an LRU cache to avoid repeated parsing:
+
+```go
+// From internal/analyzer/sla.go:18-33
+var (
+    scheduleCache     *lru.Cache[string, cron.Schedule]
+    scheduleCacheOnce sync.Once
+)
+
+func getScheduleCache() *lru.Cache[string, cron.Schedule] {
+    scheduleCacheOnce.Do(func() {
+        cache, _ := lru.New[string, cron.Schedule](1000)
+        scheduleCache = cache
+    })
+    return scheduleCache
+}
+```
+
+The cache stores up to 1000 unique schedules. This is sufficient for most clusters (CronJobs typically share common schedules like `0 0 * * *`).
+
+## Alert Behavior
+
+When the dead-man's switch triggers:
+
+### Alert Message
+
+```
+No jobs have run for 26h15m. Missed 1 scheduled run(s) (threshold: 1, expected interval: 25h)
+```
+
+The message includes:
+- Time elapsed since last run
+- Number of missed schedules
+- Configured threshold
+- Expected interval
+
+### Alert Severity
+
+Default severity is `critical`. Override via:
+
+```yaml
+alerting:
+  severityOverrides:
+    deadManTriggered: warning
+```
+
+### Duplicate Suppression
+
+Once triggered, the alert remains active until:
+- A job succeeds (clears the alert)
+- The alert is manually cleared
+- The monitor is deleted
+
+Duplicate suppression (default: 1h) prevents re-alerting within the suppression window.
+
+## Edge Cases
+
+### No Execution History
+
+For newly created CronJobs with no execution history:
+
+```go
+// From internal/analyzer/sla.go:226-230
+if lastExec == nil {
+    if cronJob.CreationTimestamp.Add(expectedInterval).Before(time.Now()) {
+        elapsed := time.Since(cronJob.CreationTimestamp.Time)
+        missedCount = int32(elapsed / expectedInterval)
+    }
+}
+```
+
+The analyzer calculates missed schedules from the CronJob's creation time.
+
+### Suspended CronJobs
+
+If `suspendedHandling.pauseMonitoring` is `true` (default), dead-man's switch checks are skipped for suspended CronJobs to avoid false alarms.
+
+```yaml
+suspendedHandling:
+  pauseMonitoring: true  # Don't alert while suspended
+  alertIfSuspendedFor: 168h  # But alert if suspended > 7 days
+```
+
+### Timezone Handling
+
+The analyzer uses the CronJob's `spec.timeZone` field (Kubernetes 1.25+) when parsing schedules:
+
+```go
+// From internal/controller/cronjobmonitor_controller.go:878-883
+loc := time.UTC
+if timezone != nil && *timezone != "" {
+    if l, err := time.LoadLocation(*timezone); err == nil {
+        loc = l
+    }
+}
+```
+
+For CronJobs without a timezone, UTC is assumed.
+
+## Examples
+
+### Critical Daily Backup
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h  # Daily with 1h buffer
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+        severities: [critical]
+    severityOverrides:
+      deadManTriggered: critical  # Wake up on-call
+```
+
+### Flexible Reporting Jobs
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: weekly-reports
+spec:
+  selector:
+    matchLabels:
+      type: report
+  deadManSwitch:
+    enabled: true
+    autoFromSchedule:
+      enabled: true
+      buffer: 2h
+      missedScheduleThreshold: 2  # Allow 1 missed run
+  alerting:
+    severityOverrides:
+      deadManTriggered: warning  # Non-critical reports
+```
+
+### High-Frequency Jobs
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: frequent-sync
+spec:
+  selector:
+    matchNames:
+      - every-5min-sync
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 10m  # 5m schedule + 5m buffer
+  alerting:
+    alertDelay: 2m  # Wait 2m to avoid transient alerts
+```
+
+## Monitoring the Monitor
+
+Expose dead-man's switch metrics via Prometheus:
+
+```promql
+# Time since last successful run
+guardian_cronjob_last_success_timestamp_seconds
+
+# Dead-man switch status (1 = triggered, 0 = ok)
+guardian_cronjob_deadman_triggered
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="False alarms for irregular schedules">
+    **Problem**: Auto-detection calculates the wrong interval for schedules like `0 0 1 * *` (monthly).
+    
+    **Solution**: Use fixed `maxTimeSinceLastSuccess`:
+    ```yaml
+    deadManSwitch:
+      maxTimeSinceLastSuccess: 744h  # 31 days
+    ```
+  </Accordion>
+  
+  <Accordion title="Alerts during planned maintenance">
+    **Problem**: Dead-man's switch triggers during scheduled downtime.
+    
+    **Solution**: Configure maintenance windows:
+    ```yaml
+    maintenanceWindows:
+      - name: monthly-upgrade
+        schedule: "0 0 1 * *"
+        duration: 4h
+        suppressAlerts: true
+    ```
+  </Accordion>
+  
+  <Accordion title="Immediate alert after CronJob creation">
+    **Problem**: Alert fires immediately for a brand new CronJob.
+    
+    **Solution**: The analyzer waits for `expectedInterval` to elapse from creation time before alerting. If you see immediate alerts, check:
+    - Is the CronJob actually running? (`kubectl get jobs`)
+    - Is the schedule valid? (`kubectl describe cronjob`)
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SLA Tracking" icon="chart-mixed" href="/concepts/sla-tracking">
+    Monitor success rates and detect regressions
+  </Card>
+  <Card title="Alert Configuration" icon="bell" href="/concepts/cronjob-monitor#alerting">
+    Customize alert behavior and routing
+  </Card>
+  <Card title="Suggested Fixes" icon="lightbulb" href="/guides/configuring-alerts#suggested-fix-patterns">
+    Automatically suggest remediation actions
+  </Card>
+</CardGroup>

@@ -1,0 +1,918 @@
+---
+title: "Helm Chart Values Reference"
+description: "Complete reference for CronJob Guardian Helm chart configuration values"
+---
+
+## Overview
+
+The CronJob Guardian Helm chart provides declarative installation and configuration for Kubernetes clusters.
+
+**Chart Repository:** `https://illeniumstudios.github.io/cronjob-guardian`
+
+**Installation:**
+```bash
+helm repo add cronjob-guardian https://illeniumstudios.github.io/cronjob-guardian
+helm repo update
+helm install cronjob-guardian cronjob-guardian/cronjob-guardian
+```
+
+## General Configuration
+
+<ParamField path="replicaCount" type="integer" default="1">
+  Number of operator replicas. For high availability, use multiple replicas with `leaderElection.enabled=true`.
+</ParamField>
+
+<ParamField path="nameOverride" type="string" default="">
+  Override the chart name in resource names.
+</ParamField>
+
+<ParamField path="fullnameOverride" type="string" default="">
+  Override the full resource name prefix.
+</ParamField>
+
+## Image Configuration
+
+<ParamField path="image.registry" type="string" default="">
+  Image registry. If set, prepended to `repository`. Useful for using private registries.
+  
+  Example: `"my-registry.example.com"`
+</ParamField>
+
+<ParamField path="image.repository" type="string" default="ghcr.io/illeniumstudios/cronjob-guardian">
+  Image repository.
+</ParamField>
+
+<ParamField path="image.pullPolicy" type="string" default="IfNotPresent">
+  Image pull policy.
+  
+  **Valid values:** `Always`, `IfNotPresent`, `Never`
+</ParamField>
+
+<ParamField path="image.tag" type="string">
+  Image tag. Defaults to the chart's `appVersion` if not specified.
+</ParamField>
+
+<ParamField path="imagePullSecrets" type="array" default="[]">
+  Image pull secrets for private registries.
+  
+  ```yaml
+  imagePullSecrets:
+    - name: my-registry-secret
+  ```
+</ParamField>
+
+## ServiceAccount & RBAC
+
+<ParamField path="serviceAccount.create" type="boolean" default="true">
+  Create a ServiceAccount for the operator.
+</ParamField>
+
+<ParamField path="serviceAccount.automount" type="boolean" default="true">
+  Automatically mount ServiceAccount token.
+</ParamField>
+
+<ParamField path="serviceAccount.annotations" type="object" default="{}">
+  ServiceAccount annotations. Useful for cloud provider IAM integration.
+  
+  ```yaml
+  serviceAccount:
+    annotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT:role/guardian
+  ```
+</ParamField>
+
+<ParamField path="serviceAccount.name" type="string" default="">
+  ServiceAccount name. Auto-generated if not set.
+</ParamField>
+
+<ParamField path="rbac.create" type="boolean" default="true">
+  Create ClusterRole and ClusterRoleBinding. Required for the operator to function.
+</ParamField>
+
+## Pod Configuration
+
+<ParamField path="podAnnotations" type="object" default="{}">
+  Annotations to add to operator pods.
+  
+  ```yaml
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8443"
+  ```
+</ParamField>
+
+<ParamField path="podLabels" type="object" default="{}">
+  Additional labels for operator pods.
+</ParamField>
+
+<ParamField path="podSecurityContext" type="object" default="{}">
+  Pod-level security context.
+  
+  ```yaml
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    fsGroup: 65532
+  ```
+</ParamField>
+
+<ParamField path="securityContext" type="object" default="{}">
+  Container-level security context.
+  
+  ```yaml
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+  ```
+</ParamField>
+
+<ParamField path="terminationGracePeriodSeconds" type="integer" default="10">
+  Pod termination grace period in seconds.
+</ParamField>
+
+<ParamField path="resources" type="object">
+  Resource requests and limits.
+  
+  **Default:**
+  ```yaml
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+  ```
+</ParamField>
+
+<ParamField path="livenessProbe" type="object">
+  Liveness probe configuration.
+  
+  **Default:**
+  ```yaml
+  livenessProbe:
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 1
+    failureThreshold: 3
+  ```
+</ParamField>
+
+<ParamField path="readinessProbe" type="object">
+  Readiness probe configuration.
+  
+  **Default:**
+  ```yaml
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+  ```
+</ParamField>
+
+<ParamField path="extraEnv" type="array" default="[]">
+  Additional environment variables.
+  
+  ```yaml
+  extraEnv:
+    - name: GUARDIAN_LOG_LEVEL
+      value: debug
+    - name: GUARDIAN_STORAGE_POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-credentials
+          key: password
+  ```
+</ParamField>
+
+<ParamField path="extraVolumeMounts" type="array" default="[]">
+  Additional volume mounts.
+  
+  ```yaml
+  extraVolumeMounts:
+    - name: custom-config
+      mountPath: /etc/guardian/custom
+      readOnly: true
+  ```
+</ParamField>
+
+<ParamField path="extraVolumes" type="array" default="[]">
+  Additional volumes.
+  
+  ```yaml
+  extraVolumes:
+    - name: custom-config
+      configMap:
+        name: guardian-custom-config
+  ```
+</ParamField>
+
+## Scheduling
+
+<ParamField path="nodeSelector" type="object" default="{}">
+  Node selector for pod scheduling.
+  
+  ```yaml
+  nodeSelector:
+    kubernetes.io/os: linux
+    node-role.kubernetes.io/control-plane: ""
+  ```
+</ParamField>
+
+<ParamField path="tolerations" type="array" default="[]">
+  Tolerations for pod scheduling.
+  
+  ```yaml
+  tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+  ```
+</ParamField>
+
+<ParamField path="affinity" type="object" default="{}">
+  Affinity rules for pod scheduling.
+  
+  ```yaml
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: cronjob-guardian
+            topologyKey: kubernetes.io/hostname
+  ```
+</ParamField>
+
+## Operator Configuration
+
+Maps directly to operator configuration options. See [Operator Configuration Reference](/api/operator-config) for detailed descriptions.
+
+<ParamField path="config.logLevel" type="string" default="info">
+  Log level.
+  
+  **Valid values:** `debug`, `info`, `warn`, `error`
+</ParamField>
+
+### Scheduler Configuration
+
+<ParamField path="config.scheduler.deadManSwitchInterval" type="duration" default="1m">
+  Dead-man's switch check interval.
+</ParamField>
+
+<ParamField path="config.scheduler.slaRecalculationInterval" type="duration" default="5m">
+  SLA recalculation interval.
+</ParamField>
+
+<ParamField path="config.scheduler.pruneInterval" type="duration" default="1h">
+  History prune interval.
+</ParamField>
+
+<ParamField path="config.scheduler.startupGracePeriod" type="duration" default="30s">
+  Grace period after startup before sending alerts.
+</ParamField>
+
+### History Retention Configuration
+
+<ParamField path="config.historyRetention.defaultDays" type="integer" default="30">
+  Default retention period in days.
+</ParamField>
+
+<ParamField path="config.historyRetention.maxDays" type="integer" default="90">
+  Maximum retention period in days.
+</ParamField>
+
+### Rate Limits Configuration
+
+<ParamField path="config.rateLimits.maxAlertsPerMinute" type="integer" default="50">
+  Maximum alerts per minute across all channels.
+</ParamField>
+
+<ParamField path="config.rateLimits.burstLimit" type="integer" default="10">
+  Maximum burst of alerts allowed.
+</ParamField>
+
+<ParamField path="config.rateLimits.defaultSuppressDuplicatesFor" type="duration" default="1h">
+  Default duration to suppress duplicate alerts.
+</ParamField>
+
+### Storage Configuration
+
+<ParamField path="config.storage.type" type="string" default="sqlite">
+  Storage backend type.
+  
+  **Valid values:** `sqlite`, `postgres`, `mysql`
+</ParamField>
+
+#### SQLite Storage
+
+<ParamField path="config.storage.sqlite.path" type="string" default="/data/guardian.db">
+  Path to SQLite database file. Requires persistence to be enabled.
+</ParamField>
+
+#### PostgreSQL Storage
+
+<ParamField path="config.storage.postgres.host" type="string" default="">
+  PostgreSQL host.
+</ParamField>
+
+<ParamField path="config.storage.postgres.port" type="integer" default="5432">
+  PostgreSQL port.
+</ParamField>
+
+<ParamField path="config.storage.postgres.database" type="string" default="">
+  PostgreSQL database name.
+</ParamField>
+
+<ParamField path="config.storage.postgres.username" type="string" default="">
+  PostgreSQL username.
+</ParamField>
+
+<ParamField path="config.storage.postgres.password" type="string" default="">
+  PostgreSQL password. Ignored if `existingSecret` is set. **Recommend using `existingSecret` instead.**
+</ParamField>
+
+<ParamField path="config.storage.postgres.existingSecret" type="string" default="">
+  Name of existing Secret containing PostgreSQL password.
+</ParamField>
+
+<ParamField path="config.storage.postgres.existingSecretKey" type="string" default="password">
+  Key in existing Secret containing password.
+</ParamField>
+
+<ParamField path="config.storage.postgres.sslMode" type="string" default="require">
+  PostgreSQL SSL mode.
+  
+  **Valid values:** `disable`, `require`, `verify-ca`, `verify-full`
+</ParamField>
+
+<ParamField path="config.storage.postgres.pool.maxIdleConns" type="integer" default="10">
+  Maximum idle connections.
+</ParamField>
+
+<ParamField path="config.storage.postgres.pool.maxOpenConns" type="integer" default="100">
+  Maximum open connections.
+</ParamField>
+
+<ParamField path="config.storage.postgres.pool.connMaxLifetime" type="duration" default="1h">
+  Maximum connection lifetime.
+</ParamField>
+
+<ParamField path="config.storage.postgres.pool.connMaxIdleTime" type="duration" default="10m">
+  Maximum connection idle time.
+</ParamField>
+
+#### MySQL Storage
+
+MySQL configuration follows the same structure as PostgreSQL:
+
+- `config.storage.mysql.host`
+- `config.storage.mysql.port` (default: `3306`)
+- `config.storage.mysql.database`
+- `config.storage.mysql.username`
+- `config.storage.mysql.password`
+- `config.storage.mysql.existingSecret`
+- `config.storage.mysql.existingSecretKey`
+- `config.storage.mysql.pool.*` (same pool settings as PostgreSQL)
+
+#### Storage Features
+
+<ParamField path="config.storage.logStorageEnabled" type="boolean" default="false">
+  Enable storing job logs in database.
+</ParamField>
+
+<ParamField path="config.storage.eventStorageEnabled" type="boolean" default="false">
+  Enable storing Kubernetes events in database.
+</ParamField>
+
+<ParamField path="config.storage.maxLogSizeKB" type="integer" default="100">
+  Maximum log size to store per execution (KB).
+</ParamField>
+
+<ParamField path="config.storage.logRetentionDays" type="integer" default="0">
+  Log retention days. `0` means use `history-retention.default-days`.
+</ParamField>
+
+## Persistence
+
+Required for SQLite storage backend.
+
+<ParamField path="persistence.enabled" type="boolean" default="true">
+  Enable persistence for SQLite database.
+</ParamField>
+
+<ParamField path="persistence.storageClass" type="string" default="">
+  Storage class name. Use `"-"` for default storage class, or specify a class name.
+</ParamField>
+
+<ParamField path="persistence.accessModes" type="array">
+  PVC access modes.
+  
+  **Default:**
+  ```yaml
+  accessModes:
+    - ReadWriteOnce
+  ```
+</ParamField>
+
+<ParamField path="persistence.size" type="string" default="1Gi">
+  PVC storage size.
+</ParamField>
+
+<ParamField path="persistence.annotations" type="object" default="{}">
+  PVC annotations.
+</ParamField>
+
+<ParamField path="persistence.selector" type="object" default="{}">
+  PVC selector for binding to specific PVs.
+  
+  ```yaml
+  persistence:
+    selector:
+      matchLabels:
+        app: cronjob-guardian
+  ```
+</ParamField>
+
+## UI & Ingress
+
+<ParamField path="ui.enabled" type="boolean" default="true">
+  Enable UI server (serves both web UI and REST API).
+</ParamField>
+
+<ParamField path="ui.port" type="integer" default="8080">
+  UI server port.
+</ParamField>
+
+### UI Service Configuration
+
+<ParamField path="ui.service.type" type="string" default="ClusterIP">
+  Service type.
+  
+  **Valid values:** `ClusterIP`, `NodePort`, `LoadBalancer`
+</ParamField>
+
+<ParamField path="ui.service.port" type="integer" default="8080">
+  Service port.
+</ParamField>
+
+<ParamField path="ui.service.nodePort" type="integer" default="null">
+  NodePort (only used if `type=NodePort`).
+</ParamField>
+
+<ParamField path="ui.service.annotations" type="object" default="{}">
+  Service annotations.
+  
+  ```yaml
+  ui:
+    service:
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: nlb
+  ```
+</ParamField>
+
+### Ingress Configuration
+
+<ParamField path="ui.ingress.enabled" type="boolean" default="false">
+  Enable Ingress for UI.
+</ParamField>
+
+<ParamField path="ui.ingress.className" type="string" default="">
+  Ingress class name.
+  
+  Example: `"nginx"`, `"traefik"`
+</ParamField>
+
+<ParamField path="ui.ingress.annotations" type="object" default="{}">
+  Ingress annotations.
+  
+  ```yaml
+  ui:
+    ingress:
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+        nginx.ingress.kubernetes.io/rewrite-target: /
+  ```
+</ParamField>
+
+<ParamField path="ui.ingress.hosts" type="array">
+  Ingress hosts.
+  
+  **Default:**
+  ```yaml
+  hosts:
+    - host: cronjob-guardian.local
+      paths:
+        - path: /
+          pathType: Prefix
+  ```
+</ParamField>
+
+<ParamField path="ui.ingress.tls" type="array" default="[]">
+  Ingress TLS configuration.
+  
+  ```yaml
+  ui:
+    ingress:
+      tls:
+        - secretName: cronjob-guardian-tls
+          hosts:
+            - cronjob-guardian.example.com
+  ```
+</ParamField>
+
+### OpenShift Route Configuration
+
+<ParamField path="ui.route.enabled" type="boolean" default="false">
+  Enable OpenShift Route.
+</ParamField>
+
+<ParamField path="ui.route.host" type="string" default="">
+  Route hostname. Leave empty for auto-generation.
+</ParamField>
+
+<ParamField path="ui.route.path" type="string" default="">
+  Route path.
+</ParamField>
+
+<ParamField path="ui.route.annotations" type="object" default="{}">
+  Route annotations.
+</ParamField>
+
+<ParamField path="ui.route.tls.enabled" type="boolean" default="true">
+  Enable TLS termination.
+</ParamField>
+
+<ParamField path="ui.route.tls.termination" type="string" default="edge">
+  TLS termination type.
+  
+  **Valid values:** `edge`, `passthrough`, `reencrypt`
+</ParamField>
+
+<ParamField path="ui.route.tls.insecureEdgeTerminationPolicy" type="string" default="Redirect">
+  Insecure edge termination policy.
+  
+  **Valid values:** `Allow`, `Redirect`, `None`
+</ParamField>
+
+## Metrics & Monitoring
+
+<ParamField path="metrics.enabled" type="boolean" default="true">
+  Enable Prometheus metrics endpoint.
+</ParamField>
+
+<ParamField path="metrics.bindAddress" type="string" default=":8443">
+  Metrics bind address.
+</ParamField>
+
+<ParamField path="metrics.secure" type="boolean" default="true">
+  Enable HTTPS for metrics.
+</ParamField>
+
+<ParamField path="metrics.certPath" type="string" default="">
+  Path to TLS certificate directory.
+</ParamField>
+
+<ParamField path="metrics.certName" type="string" default="tls.crt">
+  TLS certificate file name.
+</ParamField>
+
+<ParamField path="metrics.certKey" type="string" default="tls.key">
+  TLS key file name.
+</ParamField>
+
+<ParamField path="probes.bindAddress" type="string" default=":8081">
+  Health probes bind address.
+</ParamField>
+
+### ServiceMonitor Configuration
+
+<ParamField path="serviceMonitor.enabled" type="boolean" default="false">
+  Enable Prometheus Operator ServiceMonitor.
+</ParamField>
+
+<ParamField path="serviceMonitor.labels" type="object" default="{}">
+  ServiceMonitor labels for selector matching.
+  
+  ```yaml
+  serviceMonitor:
+    labels:
+      release: prometheus
+  ```
+</ParamField>
+
+<ParamField path="serviceMonitor.interval" type="string" default="30s">
+  Scrape interval.
+</ParamField>
+
+<ParamField path="serviceMonitor.scrapeTimeout" type="string" default="10s">
+  Scrape timeout.
+</ParamField>
+
+<ParamField path="serviceMonitor.metricRelabelings" type="array" default="[]">
+  Metric relabelings.
+  
+  ```yaml
+  serviceMonitor:
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: 'go_.*'
+        action: drop
+  ```
+</ParamField>
+
+<ParamField path="serviceMonitor.relabelings" type="array" default="[]">
+  Relabelings.
+</ParamField>
+
+## High Availability
+
+<ParamField path="leaderElection.enabled" type="boolean" default="false">
+  Enable leader election. Required for multiple replicas.
+</ParamField>
+
+<ParamField path="leaderElection.leaseDuration" type="duration" default="15s">
+  Leader lease duration.
+</ParamField>
+
+<ParamField path="leaderElection.renewDeadline" type="duration" default="10s">
+  Leader renew deadline.
+</ParamField>
+
+<ParamField path="leaderElection.retryPeriod" type="duration" default="2s">
+  Leader retry period.
+</ParamField>
+
+## Webhook Configuration
+
+<ParamField path="webhook.certPath" type="string" default="">
+  Path to TLS certificate directory for webhook server.
+</ParamField>
+
+<ParamField path="webhook.certName" type="string" default="tls.crt">
+  TLS certificate file name.
+</ParamField>
+
+<ParamField path="webhook.certKey" type="string" default="tls.key">
+  TLS key file name.
+</ParamField>
+
+<ParamField path="webhook.enableHTTP2" type="boolean" default="false">
+  Enable HTTP/2 for webhook server.
+</ParamField>
+
+## Complete Examples
+
+### Basic Installation
+
+```yaml
+# values.yaml
+replicaCount: 1
+
+config:
+  logLevel: info
+  storage:
+    type: sqlite
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+ui:
+  enabled: true
+  ingress:
+    enabled: true
+    className: nginx
+    hosts:
+      - host: guardian.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: guardian-tls
+        hosts:
+          - guardian.example.com
+```
+
+### High Availability with PostgreSQL
+
+```yaml
+# values.yaml
+replicaCount: 3
+
+config:
+  logLevel: info
+  
+  storage:
+    type: postgres
+    postgres:
+      host: postgres.database.svc.cluster.local
+      port: 5432
+      database: cronjob_guardian
+      username: guardian
+      existingSecret: postgres-credentials
+      existingSecretKey: password
+      sslMode: require
+      pool:
+        maxIdleConns: 20
+        maxOpenConns: 200
+    logStorageEnabled: true
+    eventStorageEnabled: true
+    maxLogSizeKB: 200
+  
+  historyRetention:
+    defaultDays: 60
+    maxDays: 180
+  
+  rateLimits:
+    maxAlertsPerMinute: 100
+    burstLimit: 20
+
+leaderElection:
+  enabled: true
+
+persistence:
+  enabled: false  # Not needed with PostgreSQL
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cronjob-guardian
+          topologyKey: kubernetes.io/hostname
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus
+  interval: 30s
+
+ui:
+  enabled: true
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: guardian.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: guardian-tls
+        hosts:
+          - guardian.example.com
+```
+
+### Enterprise Configuration
+
+```yaml
+# values.yaml - Enterprise deployment
+replicaCount: 5
+
+image:
+  repository: ghcr.io/illeniumstudios/cronjob-guardian
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+imagePullSecrets:
+  - name: registry-credentials
+
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/guardian
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+config:
+  logLevel: info
+  
+  scheduler:
+    deadManSwitchInterval: 30s
+    slaRecalculationInterval: 2m
+    pruneInterval: 30m
+    startupGracePeriod: 1m
+  
+  storage:
+    type: postgres
+    postgres:
+      host: postgres-ha.database.svc.cluster.local
+      port: 5432
+      database: guardian_prod
+      username: guardian
+      existingSecret: postgres-credentials
+      sslMode: verify-full
+      pool:
+        maxIdleConns: 50
+        maxOpenConns: 500
+        connMaxLifetime: 30m
+        connMaxIdleTime: 5m
+    logStorageEnabled: true
+    eventStorageEnabled: true
+    maxLogSizeKB: 500
+    logRetentionDays: 90
+  
+  historyRetention:
+    defaultDays: 90
+    maxDays: 365
+  
+  rateLimits:
+    maxAlertsPerMinute: 200
+    burstLimit: 50
+    defaultSuppressDuplicatesFor: 30m
+
+leaderElection:
+  enabled: true
+  leaseDuration: 30s
+  renewDeadline: 20s
+  retryPeriod: 5s
+
+persistence:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 1Gi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+
+nodeSelector:
+  kubernetes.io/os: linux
+  node-role.kubernetes.io/worker: ""
+
+tolerations:
+  - key: dedicated
+    operator: Equal
+    value: monitoring
+    effect: NoSchedule
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: cronjob-guardian
+        topologyKey: kubernetes.io/hostname
+
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prometheus-operator
+  interval: 15s
+  scrapeTimeout: 10s
+
+ui:
+  enabled: true
+  service:
+    type: ClusterIP
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/auth-type: basic
+      nginx.ingress.kubernetes.io/auth-secret: guardian-basic-auth
+    hosts:
+      - host: guardian.prod.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: guardian-prod-tls
+        hosts:
+          - guardian.prod.example.com
+```

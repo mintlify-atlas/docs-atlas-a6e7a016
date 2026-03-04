@@ -1,0 +1,638 @@
+---
+title: "PagerDuty Integration"
+description: "Set up PagerDuty alerts for on-call escalation of critical CronJob failures"
+---
+
+## Overview
+
+PagerDuty integration allows you to escalate critical CronJob failures to your on-call engineers. This is essential for:
+
+- 24/7 monitoring of business-critical jobs
+- Automatic escalation if alerts aren't acknowledged
+- Integration with on-call schedules and rotation
+- Incident tracking and post-mortems
+
+## Quick Start
+
+<Steps>
+  <Step title="Get PagerDuty Routing Key">
+    1. Log in to your PagerDuty account
+    2. Go to **Services** > **Service Directory**
+    3. Select or create a service (e.g., "CronJob Failures")
+    4. Go to **Integrations** tab
+    5. Click **Add Integration**
+    6. Select **Events API v2**
+    7. Copy the **Integration Key** (routing key)
+  </Step>
+
+  <Step title="Create Kubernetes Secret">
+    Store the routing key in a secret:
+
+    ```bash
+    kubectl create secret generic pagerduty-key \
+      --namespace cronjob-guardian \
+      --from-literal=routing-key=<your-integration-key>
+    ```
+  </Step>
+
+  <Step title="Create PagerDuty AlertChannel">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: pagerduty-critical
+    spec:
+      type: pagerduty
+      pagerduty:
+        routingKeySecretRef:
+          name: pagerduty-key
+          namespace: cronjob-guardian
+          key: routing-key
+        severity: critical
+    EOF
+    ```
+  </Step>
+
+  <Step title="Reference in CronJobMonitor">
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: CronJobMonitor
+    metadata:
+      name: critical-jobs
+      namespace: production
+    spec:
+      selector:
+        matchLabels:
+          tier: critical
+      alerting:
+        channelRefs:
+          - name: pagerduty-critical
+            severities: [critical]  # Only page for critical alerts
+    ```
+  </Step>
+</Steps>
+
+## Basic PagerDuty AlertChannel
+
+Here's the example from the repository:
+
+```yaml alertchannels/pagerduty.yaml
+# PagerDuty AlertChannel
+# Sends critical alerts to PagerDuty for on-call escalation
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: pagerduty-critical
+spec:
+  type: pagerduty
+  pagerduty:
+    routingKeySecretRef:
+      name: pagerduty-key
+      namespace: cronjob-guardian
+      key: routing-key
+    severity: critical
+```
+
+### Configuration Options
+
+<ResponseField name="pagerduty.routingKeySecretRef" type="object" required>
+  Reference to a Kubernetes Secret containing the PagerDuty integration key
+  
+  <Expandable title="properties">
+    <ResponseField name="name" type="string" required>
+      Name of the Secret
+    </ResponseField>
+    <ResponseField name="namespace" type="string" required>
+      Namespace where the Secret exists
+    </ResponseField>
+    <ResponseField name="key" type="string" required>
+      Key within the Secret (usually `routing-key`)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="pagerduty.severity" type="string">
+  Default PagerDuty severity level: `critical`, `error`, `warning`, or `info`
+  
+  Typically set to `critical` for on-call escalation.
+</ResponseField>
+
+## Multi-Team PagerDuty Setup
+
+Create separate PagerDuty services and AlertChannels for different teams:
+
+<CodeGroup>
+```yaml DBA Team
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: pagerduty-dba
+spec:
+  type: pagerduty
+  pagerduty:
+    routingKeySecretRef:
+      name: pagerduty-dba-key
+      namespace: cronjob-guardian
+      key: routing-key
+    severity: critical
+```
+
+```yaml Platform Team
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: pagerduty-platform
+spec:
+  type: pagerduty
+  pagerduty:
+    routingKeySecretRef:
+      name: pagerduty-platform-key
+      namespace: cronjob-guardian
+      key: routing-key
+    severity: critical
+```
+
+```yaml Data Engineering Team
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: pagerduty-data-eng
+spec:
+  type: pagerduty
+  pagerduty:
+    routingKeySecretRef:
+      name: pagerduty-data-key
+      namespace: cronjob-guardian
+      key: routing-key
+    severity: critical
+```
+</CodeGroup>
+
+### Creating Team-Specific Secrets
+
+```bash
+# DBA team
+kubectl create secret generic pagerduty-dba-key \
+  --namespace cronjob-guardian \
+  --from-literal=routing-key=<dba-integration-key>
+
+# Platform team
+kubectl create secret generic pagerduty-platform-key \
+  --namespace cronjob-guardian \
+  --from-literal=routing-key=<platform-integration-key>
+
+# Data engineering team
+kubectl create secret generic pagerduty-data-key \
+  --namespace cronjob-guardian \
+  --from-literal=routing-key=<data-integration-key>
+```
+
+## Critical Job Monitoring with PagerDuty
+
+Escalate only critical failures to PagerDuty, while sending all alerts to Slack:
+
+```yaml Database Backups
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 100  # Backups must never fail
+    maxDuration: 1h
+  alerting:
+    channelRefs:
+      # Page on-call DBA for critical issues
+      - name: pagerduty-dba
+        severities: [critical]
+      
+      # Also send to Slack for visibility
+      - name: slack-dba
+        severities: [critical, warning]
+    
+    # Treat all backup issues as critical
+    severityOverrides:
+      jobFailed: critical
+      deadManTriggered: critical
+      slaBreached: critical
+```
+
+### When to Use PagerDuty
+
+Use PagerDuty for:
+
+- **Critical backups**: Data loss prevention
+- **Revenue-impacting jobs**: Payment processing, billing
+- **Compliance-critical jobs**: Audit logs, regulatory reports
+- **Customer-facing jobs**: Email delivery, notifications
+
+Don't page for:
+
+- **Development environments**: Use Slack instead
+- **Non-critical reports**: Warnings are sufficient
+- **Flaky jobs**: Fix the root cause first
+
+## PagerDuty + Slack Routing
+
+Best practice: Route critical alerts to PagerDuty AND Slack for team awareness.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-critical
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+      environment: production
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 99
+  alerting:
+    channelRefs:
+      # Pages on-call engineer
+      - name: pagerduty-oncall
+        severities: [critical]
+      
+      # Notifies #incidents channel
+      - name: slack-incidents
+        severities: [critical]
+      
+      # Notifies #ops-alerts for all issues
+      - name: slack-ops
+        severities: [critical, warning]
+```
+
+Alert flow:
+
+1. **Critical job failure** occurs
+2. **PagerDuty** pages the on-call engineer
+3. **Slack #incidents** notifies the team
+4. **Slack #ops-alerts** provides visibility
+5. Engineer acknowledges in PagerDuty
+6. Team collaborates in Slack thread
+
+## Incident Details in PagerDuty
+
+PagerDuty incidents created by CronJob Guardian include:
+
+- **Title**: `CronJob Failed: production/daily-backup`
+- **Description**: Job details, exit code, error message
+- **Details**: Kubernetes events, pod logs, suggested fixes
+- **Links**: Dashboard URL, namespace, CronJob manifest
+
+### Customizing Incident Content
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: detailed-pages
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  alerting:
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]
+    
+    # Include rich context in PagerDuty incidents
+    includeContext:
+      logs: true
+      logLines: 200        # More logs for debugging
+      events: true         # Kubernetes events
+      podStatus: true      # Exit codes, container statuses
+      suggestedFixes: true # Automated remediation suggestions
+```
+
+## Alert Delay for PagerDuty
+
+Avoid paging for transient failures by adding a delay:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: with-retry-buffer
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  alerting:
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]
+    
+    # Wait 5 minutes before paging
+    # If job retries and succeeds, page is cancelled
+    alertDelay: 5m
+```
+
+### How Alert Delay Works
+
+1. Job fails at 08:00:00
+2. Guardian waits until 08:05:00 before alerting
+3. If job retries and succeeds by 08:04:00, alert is cancelled
+4. If still failed at 08:05:00, PagerDuty incident is created
+
+<Tip>
+  Set `alertDelay` to slightly longer than your CronJob's `backoffLimit` retry window. For example:
+  
+  - CronJob with `backoffLimit: 3` typically retries for ~3-5 minutes
+  - Set `alertDelay: 5m` to allow retries to complete
+  - Only page if retries are exhausted
+</Tip>
+
+## Suppressing Duplicate Pages
+
+Prevent repeat pages for the same failure:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: no-duplicate-pages
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  alerting:
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]
+    
+    # Don't page again for 1 hour
+    suppressDuplicatesFor: 1h
+```
+
+This prevents:
+
+- Paging every 5 minutes for the same failed job
+- Alert fatigue from recurring issues
+- Overwhelming on-call engineers during incidents
+
+## Testing PagerDuty Integration
+
+<Steps>
+  <Step title="Verify AlertChannel is ready">
+    ```bash
+    kubectl get alertchannel pagerduty-critical
+    kubectl describe alertchannel pagerduty-critical
+    ```
+
+    Look for:
+    ```yaml
+    Status:
+      Conditions:
+        - Type: Ready
+          Status: True
+    ```
+  </Step>
+
+  <Step title="Create a test failing job">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: test-page
+      namespace: production
+      labels:
+        tier: critical
+    spec:
+      schedule: "*/5 * * * *"
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: test
+                  image: busybox
+                  command: ["sh", "-c", "echo 'Testing PagerDuty' && exit 1"]
+              restartPolicy: Never
+    EOF
+    ```
+  </Step>
+
+  <Step title="Wait for job failure and page">
+    ```bash
+    # Watch job execution
+    kubectl get jobs -n production -w
+    ```
+
+    After the job fails, check PagerDuty for a new incident.
+  </Step>
+
+  <Step title="Verify incident in PagerDuty">
+    1. Log in to PagerDuty
+    2. Go to **Incidents**
+    3. Look for incident titled `CronJob Failed: production/test-page`
+    4. Verify incident details include logs and context
+  </Step>
+
+  <Step title="Acknowledge and resolve">
+    1. Acknowledge the incident in PagerDuty
+    2. Delete the test CronJob:
+
+    ```bash
+    kubectl delete cronjob test-page -n production
+    ```
+
+    3. Resolve the incident in PagerDuty
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No incidents created in PagerDuty">
+    **Check routing key secret:**
+    ```bash
+    kubectl get secret pagerduty-key -n cronjob-guardian -o jsonpath='{.data.routing-key}' | base64 -d
+    ```
+
+    Verify this matches your PagerDuty integration key.
+
+    **Check AlertChannel status:**
+    ```bash
+    kubectl describe alertchannel pagerduty-critical
+    ```
+
+    **Check controller logs:**
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller-manager | grep -i pagerduty
+    ```
+  </Accordion>
+
+  <Accordion title="PagerDuty returns 403 or 404">
+    The integration key may be invalid or revoked.
+
+    1. Go to PagerDuty > Services > Your Service > Integrations
+    2. Verify the Events API v2 integration exists
+    3. Regenerate the integration key if needed
+    4. Update the secret:
+
+    ```bash
+    kubectl create secret generic pagerduty-key \
+      --namespace cronjob-guardian \
+      --from-literal=routing-key=<new-key> \
+      --dry-run=client -o yaml | kubectl apply -f -
+    ```
+  </Accordion>
+
+  <Accordion title="Too many pages">
+    **Use alert delays:**
+    ```yaml
+    alerting:
+      alertDelay: 5m  # Wait before paging
+    ```
+
+    **Suppress duplicates:**
+    ```yaml
+    alerting:
+      suppressDuplicatesFor: 1h
+    ```
+
+    **Only page for critical:**
+    ```yaml
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]  # No warnings
+    ```
+
+    **Use severity overrides:**
+    ```yaml
+    severityOverrides:
+      jobFailed: critical
+      slaBreached: warning  # Don't page for SLA, only Slack
+    ```
+  </Accordion>
+
+  <Accordion title="Missing context in incidents">
+    Ensure `includeContext` is configured:
+
+    ```yaml
+    alerting:
+      includeContext:
+        logs: true
+        logLines: 200
+        events: true
+        podStatus: true
+        suggestedFixes: true
+    ```
+
+    Verify pods are still running when the alert fires (logs may be unavailable if pods are deleted quickly).
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Critical Only" icon="exclamation-triangle">
+    Only page for critical severity. Send warnings to Slack to avoid alert fatigue.
+  </Card>
+  
+  <Card title="Use Alert Delays" icon="clock">
+    Set `alertDelay: 5m` to allow job retries before paging on-call engineers.
+  </Card>
+  
+  <Card title="Combine with Slack" icon="comments">
+    Always route to both PagerDuty (for escalation) and Slack (for team visibility).
+  </Card>
+  
+  <Card title="Suppress Duplicates" icon="ban">
+    Use `suppressDuplicatesFor: 1h` to prevent repeat pages for the same issue.
+  </Card>
+  
+  <Card title="Include Rich Context" icon="info-circle">
+    Enable logs, events, and suggested fixes to help on-call engineers debug faster.
+  </Card>
+  
+  <Card title="Test Integration" icon="vial">
+    Regularly test with a failing CronJob to ensure pages reach the right people.
+  </Card>
+</CardGroup>
+
+## Example: Database Backup with PagerDuty
+
+Complete real-world example:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+  namespace: databases
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 100
+    maxDuration: 1h
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+        severities: [critical]
+      - name: slack-dba
+        severities: [critical, warning]
+    
+    severityOverrides:
+      jobFailed: critical
+      deadManTriggered: critical
+    
+    alertDelay: 2m  # Allow brief retries
+    suppressDuplicatesFor: 30m
+    
+    includeContext:
+      logs: true
+      logLines: 150
+      events: true
+      suggestedFixes: true
+    
+    suggestedFixPatterns:
+      - name: disk-full
+        match:
+          logPattern: "No space left on device|disk full"
+        suggestion: "Backup storage is full. Check PVC usage: kubectl get pvc -n {\{.Namespace}\}"
+        priority: 150
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Slack Alerts" icon="slack" href="/examples/slack-alerts">
+    Set up Slack notifications
+  </Card>
+  <Card title="Webhook Alerts" icon="webhook" href="/examples/webhook-alerts">
+    Integrate with custom systems
+  </Card>
+  <Card title="Advanced Monitoring" icon="wand-magic-sparkles" href="/examples/advanced-monitor">
+    Configure SLA tracking and maintenance windows
+  </Card>
+  <Card title="Alert Channels Reference" icon="book" href="/api/alertchannel">
+    Complete API documentation
+  </Card>
+</CardGroup>

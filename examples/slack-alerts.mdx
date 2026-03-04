@@ -1,0 +1,532 @@
+---
+title: "Slack Alert Integration"
+description: "Set up Slack notifications for CronJob failures and monitoring alerts"
+---
+
+## Overview
+
+Slack is one of the most popular alert channels for CronJob Guardian. Alerts appear as rich messages in your team's Slack channels with:
+
+- Job failure details
+- Error logs and Kubernetes events
+- Suggested fixes
+- Links to your monitoring dashboard
+
+## Quick Start
+
+Set up Slack alerts in three steps:
+
+<Steps>
+  <Step title="Create a Slack Incoming Webhook">
+    1. Go to your Slack workspace settings
+    2. Navigate to **Apps** > **Incoming Webhooks**
+    3. Click **Add to Slack**
+    4. Select the channel (e.g., `#cronjob-alerts`)
+    5. Copy the webhook URL (starts with `https://hooks.slack.com/services/...`)
+  </Step>
+
+  <Step title="Create a Kubernetes Secret">
+    Store the webhook URL in a secret:
+
+    ```bash
+    kubectl create secret generic slack-webhook \
+      --namespace cronjob-guardian \
+      --from-literal=url=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+    ```
+  </Step>
+
+  <Step title="Create an AlertChannel">
+    Apply the Slack AlertChannel configuration:
+
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: slack-ops
+    spec:
+      type: slack
+      slack:
+        webhookSecretRef:
+          name: slack-webhook
+          namespace: cronjob-guardian
+          key: url
+        defaultChannel: "#cronjob-alerts"
+      rateLimiting:
+        maxAlertsPerHour: 100
+        burstLimit: 10
+    EOF
+    ```
+  </Step>
+
+  <Step title="Reference in CronJobMonitor">
+    Use the AlertChannel in your monitors:
+
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: CronJobMonitor
+    metadata:
+      name: critical-jobs
+      namespace: production
+    spec:
+      selector:
+        matchLabels:
+          tier: critical
+      alerting:
+        channelRefs:
+          - name: slack-ops  # References the AlertChannel
+    ```
+  </Step>
+</Steps>
+
+## Basic Slack AlertChannel
+
+Here's the complete example from the repository:
+
+```yaml alertchannels/slack.yaml
+# Slack AlertChannel
+# Sends alerts to a Slack channel via incoming webhook
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#alerts"
+  rateLimiting:
+    maxAlertsPerHour: 100
+    burstLimit: 10
+```
+
+### Configuration Options
+
+<ResponseField name="slack.webhookSecretRef" type="object" required>
+  Reference to a Kubernetes Secret containing the webhook URL
+  
+  <Expandable title="properties">
+    <ResponseField name="name" type="string" required>
+      Name of the Secret
+    </ResponseField>
+    <ResponseField name="namespace" type="string" required>
+      Namespace where the Secret exists
+    </ResponseField>
+    <ResponseField name="key" type="string" required>
+      Key within the Secret (usually `url`)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="slack.defaultChannel" type="string">
+  Default Slack channel for alerts (e.g., `#cronjob-alerts`)
+  
+  Can be overridden per-alert if needed.
+</ResponseField>
+
+<ResponseField name="rateLimiting" type="object">
+  Prevent alert storms
+  
+  <Expandable title="properties">
+    <ResponseField name="maxAlertsPerHour" type="integer">
+      Maximum alerts to send per hour (default: unlimited)
+    </ResponseField>
+    <ResponseField name="burstLimit" type="integer">
+      Maximum alerts in a short burst (default: 10)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+## Multiple Slack Channels
+
+Create separate AlertChannels for different teams or alert types:
+
+<CodeGroup>
+```yaml Operations Channel
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-ops
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook-ops
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#ops-alerts"
+```
+
+```yaml Development Channel
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-dev
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook-dev
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#dev-alerts"
+```
+
+```yaml Incidents Channel
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-incidents
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook-incidents
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#incidents"
+  rateLimiting:
+    maxAlertsPerHour: 50  # Stricter limit for incidents channel
+```
+</CodeGroup>
+
+### Creating Multiple Secrets
+
+Create separate webhook URLs for each channel:
+
+```bash
+# Ops team
+kubectl create secret generic slack-webhook-ops \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://hooks.slack.com/services/YOUR/OPS/WEBHOOK
+
+# Dev team
+kubectl create secret generic slack-webhook-dev \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://hooks.slack.com/services/YOUR/DEV/WEBHOOK
+
+# Incidents
+kubectl create secret generic slack-webhook-incidents \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://hooks.slack.com/services/YOUR/INCIDENT/WEBHOOK
+```
+
+## Routing Alerts by Severity
+
+Send critical alerts to one channel and warnings to another:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: tiered-alerts
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 95
+  alerting:
+    channelRefs:
+      # Critical alerts go to incidents channel
+      - name: slack-incidents
+        severities: [critical]
+      
+      # All alerts go to ops channel for visibility
+      - name: slack-ops
+        severities: [critical, warning]
+```
+
+With this configuration:
+- Critical job failures go to both `#incidents` and `#ops-alerts`
+- Warning-level alerts (e.g., SLA breaches) only go to `#ops-alerts`
+
+## Alert Message Format
+
+Slack alerts from CronJob Guardian include rich formatting:
+
+```
+🔴 CronJob Failed: production/daily-backup
+
+Job: daily-backup
+Namespace: production
+Execution: job-daily-backup-28501234
+Time: 2026-03-04 08:15:23 UTC
+Duration: 5m 32s
+Exit Code: 1
+
+📋 Error Logs (last 50 lines):
+Error: Failed to connect to database
+Connection timeout after 30s
+Host: postgres.production.svc.cluster.local:5432
+
+💡 Suggested Fix:
+Database connection failed. Check:
+1. Database pod is running: kubectl get pods -n production -l app=postgres
+2. Service is healthy: kubectl get svc postgres -n production
+3. Network policies allow connection from this namespace
+
+🔗 View Details: https://guardian.example.com/jobs/production/daily-backup
+```
+
+### Customizing Alert Content
+
+Control what appears in alerts via the CronJobMonitor configuration:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: detailed-alerts
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  alerting:
+    channelRefs:
+      - name: slack-ops
+    
+    # Customize alert content
+    includeContext:
+      logs: true              # Include pod logs
+      logLines: 100           # Number of log lines
+      events: true            # Include Kubernetes events
+      podStatus: true         # Include pod status details
+      suggestedFixes: true    # Include fix suggestions
+```
+
+<Tip>
+  For production debugging, set `logLines: 200` to get more context. For high-volume environments, set `logLines: 50` to keep messages concise.
+</Tip>
+
+## Rate Limiting
+
+Prevent Slack from being overwhelmed during incidents:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-ops
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook
+      namespace: cronjob-guardian
+      key: url
+  rateLimiting:
+    maxAlertsPerHour: 100   # Max 100 alerts per hour
+    burstLimit: 10          # Max 10 alerts in quick succession
+```
+
+### How Rate Limiting Works
+
+1. **Burst Limit**: Allows up to 10 alerts immediately
+2. **Hourly Limit**: After burst, limits to 100 alerts per hour
+3. **Dropped Alerts**: When limits are exceeded, alerts are dropped (not queued)
+4. **Per Channel**: Each AlertChannel has independent rate limits
+
+<Warning>
+  Rate limiting drops alerts when exceeded. If you hit limits frequently:
+  
+  1. Increase `maxAlertsPerHour`
+  2. Use `alertDelay` in monitors to reduce transient alerts
+  3. Tune `suppressDuplicatesFor` to avoid repeated alerts
+  4. Consider splitting monitors across multiple channels
+</Warning>
+
+## Testing Your Slack Integration
+
+<Steps>
+  <Step title="Verify the AlertChannel is ready">
+    ```bash
+    kubectl get alertchannel slack-ops
+    kubectl describe alertchannel slack-ops
+    ```
+
+    Look for:
+    ```yaml
+    Status:
+      Conditions:
+        - Type: Ready
+          Status: True
+          Message: Slack webhook configured successfully
+    ```
+  </Step>
+
+  <Step title="Create a test CronJob that fails">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: test-failure
+      namespace: production
+      labels:
+        tier: critical
+    spec:
+      schedule: "*/5 * * * *"
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: test
+                  image: busybox
+                  command: ["sh", "-c", "echo 'Testing alert' && exit 1"]
+              restartPolicy: Never
+    EOF
+    ```
+  </Step>
+
+  <Step title="Wait for the job to fail">
+    ```bash
+    # Watch for job execution
+    kubectl get jobs -n production -w
+    
+    # Check job status
+    kubectl get job -n production -l job-name=test-failure --sort-by=.metadata.creationTimestamp
+    ```
+  </Step>
+
+  <Step title="Check Slack for the alert">
+    Within a few minutes, you should see an alert in your configured Slack channel.
+
+    If no alert appears, check:
+    ```bash
+    # Monitor logs
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller-manager
+    
+    # Check AlertChannel status
+    kubectl get alertchannel slack-ops -o yaml
+    ```
+  </Step>
+
+  <Step title="Clean up the test">
+    ```bash
+    kubectl delete cronjob test-failure -n production
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No alerts appearing in Slack">
+    **Check webhook secret:**
+    ```bash
+    kubectl get secret slack-webhook -n cronjob-guardian -o jsonpath='{.data.url}' | base64 -d
+    ```
+
+    Verify the URL is correct and starts with `https://hooks.slack.com/services/`.
+
+    **Check AlertChannel status:**
+    ```bash
+    kubectl describe alertchannel slack-ops
+    ```
+
+    Look for error messages in the status.
+
+    **Check controller logs:**
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller-manager | grep -i slack
+    ```
+  </Accordion>
+
+  <Accordion title="Webhook URL returns 404">
+    The webhook URL may have been revoked or is incorrect.
+
+    1. Go to Slack workspace settings
+    2. Check **Incoming Webhooks** configuration
+    3. Generate a new webhook if needed
+    4. Update the secret:
+
+    ```bash
+    kubectl create secret generic slack-webhook \
+      --namespace cronjob-guardian \
+      --from-literal=url=<new-webhook-url> \
+      --dry-run=client -o yaml | kubectl apply -f -
+    ```
+  </Accordion>
+
+  <Accordion title="Too many alerts">
+    **Enable rate limiting:**
+    ```yaml
+    rateLimiting:
+      maxAlertsPerHour: 50
+      burstLimit: 5
+    ```
+
+    **Suppress duplicates in monitors:**
+    ```yaml
+    alerting:
+      suppressDuplicatesFor: 1h
+      alertDelay: 5m
+    ```
+
+    **Filter alerts by severity:**
+    ```yaml
+    channelRefs:
+      - name: slack-ops
+        severities: [critical]  # Only critical, no warnings
+    ```
+  </Accordion>
+
+  <Accordion title="Alerts going to wrong channel">
+    Check the `defaultChannel` in the AlertChannel:
+
+    ```yaml
+    slack:
+      defaultChannel: "#cronjob-alerts"  # Must match your Slack channel name
+    ```
+
+    Channel name must include the `#` prefix and match exactly.
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Separate Channels by Team" icon="users">
+    Create one AlertChannel per team with their own Slack channel for better alert ownership.
+  </Card>
+  
+  <Card title="Use Severity Filtering" icon="filter">
+    Send critical alerts to high-visibility channels, warnings to team channels.
+  </Card>
+  
+  <Card title="Enable Rate Limiting" icon="gauge">
+    Always set `maxAlertsPerHour` to prevent alert storms during incidents.
+  </Card>
+  
+  <Card title="Include Context" icon="list">
+    Set `includeContext.logs: true` to provide debugging information in alerts.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="PagerDuty Alerts" icon="bullhorn" href="/examples/pagerduty-alerts">
+    Escalate critical alerts to on-call engineers
+  </Card>
+  <Card title="Webhook Alerts" icon="webhook" href="/examples/webhook-alerts">
+    Integrate with custom systems
+  </Card>
+  <Card title="Advanced Monitoring" icon="wand-magic-sparkles" href="/examples/advanced-monitor">
+    Configure SLA tracking and maintenance windows
+  </Card>
+  <Card title="Alert Channels Reference" icon="book" href="/api/alertchannel">
+    Complete API documentation
+  </Card>
+</CardGroup>

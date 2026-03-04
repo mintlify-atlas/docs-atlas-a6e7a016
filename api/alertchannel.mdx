@@ -1,0 +1,545 @@
+---
+title: "AlertChannel API Reference"
+description: "Complete API reference for the AlertChannel Custom Resource Definition"
+---
+
+## Overview
+
+The `AlertChannel` is a cluster-scoped Custom Resource that defines alert notification destinations. It supports Slack, PagerDuty, generic webhooks, and email.
+
+**API Group:** `guardian.illenium.net/v1alpha1`
+
+**Kind:** `AlertChannel`
+
+**Scope:** Cluster (not namespaced)
+
+## Basic Examples
+
+### Slack Channel
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#alerts"
+  rateLimiting:
+    maxAlertsPerHour: 100
+    burstLimit: 10
+```
+
+### PagerDuty Channel
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: pagerduty-critical
+spec:
+  type: pagerduty
+  pagerduty:
+    routingKeySecretRef:
+      name: pagerduty-key
+      namespace: cronjob-guardian
+      key: routing-key
+    severity: critical
+```
+
+## Spec Fields
+
+### type
+
+<ParamField path="type" type="string" required>
+  Type of alert channel.
+  
+  **Validation:** Enum `slack`, `pagerduty`, `webhook`, `email`
+</ParamField>
+
+### slack
+
+<ParamField path="slack" type="object">
+  Slack configuration. Required when `type` is `slack`.
+  
+  <Expandable title="properties">
+    <ParamField path="webhookSecretRef" type="object" required>
+      References the Secret containing the Slack webhook URL.
+      
+      <Expandable title="properties">
+        <ParamField path="name" type="string" required>
+          Secret name.
+        </ParamField>
+        
+        <ParamField path="namespace" type="string" required>
+          Secret namespace.
+        </ParamField>
+        
+        <ParamField path="key" type="string" required>
+          Key within the Secret containing the webhook URL.
+        </ParamField>
+      </Expandable>
+      
+      **Secret Example:**
+      ```yaml
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: slack-webhook
+        namespace: cronjob-guardian
+      stringData:
+        url: https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+      ```
+    </ParamField>
+    
+    <ParamField path="defaultChannel" type="string">
+      Overrides the webhook's default channel. Use Slack channel format (e.g., `"#alerts"` or `"@username"`).
+    </ParamField>
+    
+    <ParamField path="messageTemplate" type="string">
+      Go template for custom message formatting. Available template variables:
+      - `{\{.Type}\}` - Alert type
+      - `{\{.Severity}\}` - Alert severity
+      - `{\{.Message}\}` - Alert message
+      - `{\{.CronJobName}\}` - CronJob name
+      - `{\{.Namespace}\}` - Namespace
+      - `{\{.Context}\}` - Additional context
+      
+      If not specified, uses the default Slack message format.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### pagerduty
+
+<ParamField path="pagerduty" type="object">
+  PagerDuty configuration. Required when `type` is `pagerduty`.
+  
+  <Expandable title="properties">
+    <ParamField path="routingKeySecretRef" type="object" required>
+      References the Secret containing the PagerDuty Events API v2 routing key (also called integration key).
+      
+      <Expandable title="properties">
+        <ParamField path="name" type="string" required>
+          Secret name.
+        </ParamField>
+        
+        <ParamField path="namespace" type="string" required>
+          Secret namespace.
+        </ParamField>
+        
+        <ParamField path="key" type="string" required>
+          Key within the Secret containing the routing key.
+        </ParamField>
+      </Expandable>
+      
+      **Secret Example:**
+      ```yaml
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: pagerduty-key
+        namespace: cronjob-guardian
+      stringData:
+        routing-key: your-pagerduty-integration-key
+      ```
+    </ParamField>
+    
+    <ParamField path="severity" type="string">
+      Default PagerDuty severity for alerts.
+      
+      **Validation:** Enum `critical`, `error`, `warning`, `info`
+      
+      Maps Guardian severities to PagerDuty:
+      - Guardian `critical` → PagerDuty `critical`
+      - Guardian `warning` → PagerDuty `warning`
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### webhook
+
+<ParamField path="webhook" type="object">
+  Generic webhook configuration. Required when `type` is `webhook`.
+  
+  <Expandable title="properties">
+    <ParamField path="urlSecretRef" type="object" required>
+      References the Secret containing the webhook URL.
+      
+      <Expandable title="properties">
+        <ParamField path="name" type="string" required>
+          Secret name.
+        </ParamField>
+        
+        <ParamField path="namespace" type="string" required>
+          Secret namespace.
+        </ParamField>
+        
+        <ParamField path="key" type="string" required>
+          Key within the Secret containing the URL.
+        </ParamField>
+      </Expandable>
+      
+      **Secret Example:**
+      ```yaml
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: webhook-url
+        namespace: cronjob-guardian
+      stringData:
+        url: https://your-webhook-endpoint.com/alerts
+      ```
+    </ParamField>
+    
+    <ParamField path="method" type="string" default="POST">
+      HTTP method for the webhook request.
+      
+      **Validation:** Enum `POST`, `PUT`
+    </ParamField>
+    
+    <ParamField path="headers" type="map[string]string">
+      Custom HTTP headers to include in webhook requests.
+      
+      ```yaml
+      headers:
+        Content-Type: application/json
+        X-Custom-Header: guardian
+        Authorization: Bearer ${TOKEN}
+      ```
+    </ParamField>
+    
+    <ParamField path="payloadTemplate" type="string">
+      Go template for custom JSON payload formatting. Available template variables:
+      - `{\{.Type}\}` - Alert type
+      - `{\{.Severity}\}` - Alert severity
+      - `{\{.Message}\}` - Alert message
+      - `{\{.CronJobName}\}` - CronJob name
+      - `{\{.Namespace}\}` - Namespace
+      - `{\{.Timestamp}\}` - Alert timestamp
+      - `{\{.Context}\}` - Additional context
+      
+      **Example:**
+      ```yaml
+      payloadTemplate: |
+        {
+          "alert_type": "{\{.Type}\}",
+          "severity": "{\{.Severity}\}",
+          "message": "{\{.Message}\}",
+          "cronjob": "{\{.Namespace}\}/{\{.CronJobName}\}",
+          "timestamp": "{\{.Timestamp}\}"
+        }
+      ```
+      
+      If not specified, uses the default webhook payload format.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### email
+
+<ParamField path="email" type="object">
+  Email configuration. Required when `type` is `email`.
+  
+  <Expandable title="properties">
+    <ParamField path="smtpSecretRef" type="object" required>
+      References the Secret containing SMTP configuration.
+      
+      <Expandable title="properties">
+        <ParamField path="name" type="string" required>
+          Secret name.
+        </ParamField>
+        
+        <ParamField path="namespace" type="string" required>
+          Secret namespace.
+        </ParamField>
+      </Expandable>
+      
+      **Secret Example:**
+      The Secret must contain these keys:
+      - `host` - SMTP server hostname
+      - `port` - SMTP server port (e.g., "587" for TLS)
+      - `username` - SMTP username
+      - `password` - SMTP password
+      
+      ```yaml
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: smtp-credentials
+        namespace: cronjob-guardian
+      stringData:
+        host: smtp.gmail.com
+        port: "587"
+        username: alerts@example.com
+        password: your-app-password
+      ```
+    </ParamField>
+    
+    <ParamField path="from" type="string" required>
+      Sender email address.
+      
+      Example: `"guardian@example.com"`
+    </ParamField>
+    
+    <ParamField path="to" type="array" required>
+      List of recipient email addresses.
+      
+      ```yaml
+      to:
+        - ops-team@example.com
+        - oncall@example.com
+      ```
+    </ParamField>
+    
+    <ParamField path="subjectTemplate" type="string">
+      Go template for email subject. Available template variables:
+      - `{\{.Type}\}` - Alert type
+      - `{\{.Severity}\}` - Alert severity
+      - `{\{.CronJobName}\}` - CronJob name
+      - `{\{.Namespace}\}` - Namespace
+      
+      **Default:** `"[{\{.Severity | upper}\}] CronJob Alert: {\{.Namespace}\}/{\{.CronJobName}\}"`
+    </ParamField>
+    
+    <ParamField path="bodyTemplate" type="string">
+      Go template for email body (supports plain text or HTML). Available template variables:
+      - `{\{.Type}\}` - Alert type
+      - `{\{.Severity}\}` - Alert severity
+      - `{\{.Message}\}` - Alert message
+      - `{\{.CronJobName}\}` - CronJob name
+      - `{\{.Namespace}\}` - Namespace
+      - `{\{.Timestamp}\}` - Alert timestamp
+      - `{\{.Context}\}` - Additional context
+      
+      If not specified, uses the default email body format.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### rateLimiting
+
+<ParamField path="rateLimiting" type="object">
+  Prevents alert storms by rate limiting notifications.
+  
+  <Expandable title="properties">
+    <ParamField path="maxAlertsPerHour" type="integer" default="100">
+      Maximum number of alerts this channel can send per hour.
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+    
+    <ParamField path="burstLimit" type="integer" default="10">
+      Maximum number of alerts that can be sent in a short burst (per minute).
+      
+      **Validation:** Minimum value is `1`
+    </ParamField>
+  </Expandable>
+  
+  ```yaml
+  rateLimiting:
+    maxAlertsPerHour: 50
+    burstLimit: 5
+  ```
+</ParamField>
+
+### testOnSave
+
+<ParamField path="testOnSave" type="boolean" default="false">
+  Sends a test alert when the AlertChannel is created or updated. Useful for validating configuration.
+  
+  The test result will be reflected in the `status.lastTestResult` field.
+</ParamField>
+
+## Status Fields
+
+The `status` subresource provides operational metrics and health information.
+
+<ResponseField name="ready" type="boolean">
+  Indicates whether the channel is operational and can send alerts.
+</ResponseField>
+
+<ResponseField name="lastTestTime" type="timestamp">
+  When the channel was last tested (via `testOnSave` or manual testing).
+</ResponseField>
+
+<ResponseField name="lastTestResult" type="string">
+  Result of the last test.
+  
+  **Values:** `success`, `failed`
+</ResponseField>
+
+<ResponseField name="lastTestError" type="string">
+  Error message from the last failed test.
+</ResponseField>
+
+<ResponseField name="alertsSentTotal" type="integer">
+  Cumulative count of alerts successfully sent via this channel.
+</ResponseField>
+
+<ResponseField name="lastAlertTime" type="timestamp">
+  When the last alert was successfully sent.
+</ResponseField>
+
+<ResponseField name="alertsFailedTotal" type="integer">
+  Cumulative count of alerts that failed to send via this channel.
+</ResponseField>
+
+<ResponseField name="lastFailedTime" type="timestamp">
+  When the last alert send failure occurred.
+</ResponseField>
+
+<ResponseField name="lastFailedError" type="string">
+  Error message from the last failed send attempt.
+</ResponseField>
+
+<ResponseField name="consecutiveFailures" type="integer">
+  Number of consecutive failed send attempts. Resets to 0 on successful send.
+  
+  High values may indicate channel configuration issues or external service outages.
+</ResponseField>
+
+<ResponseField name="conditions" type="array">
+  Standard Kubernetes condition array. Common condition types:
+  
+  - `Ready`: Channel is operational and can send alerts
+  - `ConfigValid`: Channel configuration is valid
+  - `SecretFound`: Referenced secrets exist and are readable
+</ResponseField>
+
+## Complete Examples
+
+### Slack with Custom Template
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-custom
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#cronjob-alerts"
+    messageTemplate: |
+      :{\{if eq .Severity "critical"}\}rotating_light{\{else}\}warning{\{end}\}: *{\{.Type}\}*
+      
+      *CronJob:* `{\{.Namespace}\}/{\{.CronJobName}\}`
+      *Severity:* {\{.Severity | upper}\}
+      *Message:* {\{.Message}\}
+      {\{if .Context.SuggestedFix}\}
+      
+      *Suggested Fix:* {\{.Context.SuggestedFix}\}{\{end}\}
+  rateLimiting:
+    maxAlertsPerHour: 200
+    burstLimit: 20
+  testOnSave: true
+```
+
+### Webhook with Authentication
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: webhook-authenticated
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-config
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer ${WEBHOOK_TOKEN}
+      X-Source: cronjob-guardian
+    payloadTemplate: |
+      {
+        "event_type": "cronjob_alert",
+        "severity": "{\{.Severity}\}",
+        "alert": {
+          "type": "{\{.Type}\}",
+          "message": "{\{.Message}\}",
+          "cronjob": {
+            "name": "{\{.CronJobName}\}",
+            "namespace": "{\{.Namespace}\}"
+          },
+          "timestamp": "{\{.Timestamp}\}"
+        }
+      }
+  rateLimiting:
+    maxAlertsPerHour: 100
+    burstLimit: 10
+```
+
+### Email with HTML Template
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-html
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: cronjob-guardian@example.com
+    to:
+      - devops@example.com
+      - oncall@example.com
+    subjectTemplate: "[{\{.Severity | upper}\}] {\{.Type}\} - {\{.Namespace}\}/{\{.CronJobName}\}"
+    bodyTemplate: |
+      <html>
+      <body>
+        <h2 style="color: {\{if eq .Severity "critical"}\}red{\{else}\}orange{\{end}\};">
+          {\{.Type}\}
+        </h2>
+        <p><strong>CronJob:</strong> {\{.Namespace}\}/{\{.CronJobName}\}</p>
+        <p><strong>Severity:</strong> {\{.Severity | upper}\}</p>
+        <p><strong>Message:</strong> {\{.Message}\}</p>
+        <p><strong>Time:</strong> {\{.Timestamp}\}</p>
+        {\{if .Context.SuggestedFix}\}
+        <hr>
+        <h3>Suggested Fix</h3>
+        <p>{\{.Context.SuggestedFix}\}</p>
+        {\{end}\}
+      </body>
+      </html>
+  rateLimiting:
+    maxAlertsPerHour: 50
+    burstLimit: 5
+  testOnSave: true
+```
+
+## Referencing AlertChannels
+
+AlertChannels are referenced in CronJobMonitor resources:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: production-jobs
+  namespace: production
+spec:
+  alerting:
+    enabled: true
+    channelRefs:
+      - name: pagerduty-critical
+        severities: [critical]
+      - name: slack-alerts
+        severities: [critical, warning]
+      - name: email-team
+```

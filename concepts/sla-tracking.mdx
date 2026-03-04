@@ -1,0 +1,535 @@
+---
+title: SLA Tracking
+description: Monitor success rates, track duration percentiles, and detect performance regressions
+---
+
+## Overview
+
+SLA (Service Level Agreement) tracking provides quantitative metrics about CronJob reliability and performance:
+
+- **Success Rate**: Percentage of successful executions over a rolling window
+- **Duration Percentiles**: P50, P95, P99 execution times for performance analysis
+- **Regression Detection**: Automatic alerts when performance degrades
+- **Threshold Violations**: Alerts when jobs exceed maximum duration or fall below minimum success rate
+
+## Success Rate Tracking
+
+Success rate is calculated as:
+
+```
+SuccessRate = (SuccessfulRuns / TotalRuns) × 100
+```
+
+The calculation uses a **rolling window** (default: 7 days) to provide recent performance data while smoothing out transient issues.
+
+### Configuration
+
+```yaml
+sla:
+  enabled: true
+  minSuccessRate: 95.0    # Alert if < 95%
+  windowDays: 7           # 7-day rolling window
+```
+
+<ParamField path="minSuccessRate" type="float64" default="95.0">
+  Minimum acceptable success rate percentage (0-100).
+  
+  **Choosing the right threshold:**
+  - Critical workloads (backups, billing): `99.0` or `100.0`
+  - Production jobs: `95.0` - `98.0`
+  - Non-critical automation: `90.0` - `95.0`
+</ParamField>
+
+<ParamField path="windowDays" type="int32" default="7">
+  Rolling window size in days for calculating success rate.
+  
+  **Trade-offs:**
+  - Smaller windows (1-3 days): More sensitive to recent failures, faster alerting
+  - Larger windows (14-30 days): More stable, less sensitive to transient issues
+</ParamField>
+
+### Implementation
+
+The analyzer queries the database for executions within the window:
+
+```go
+// From internal/analyzer/sla.go:114-158
+func (a *analyzer) CheckSLA(ctx context.Context, 
+    cronJob types.NamespacedName, 
+    config *v1alpha1.SLAConfig) (*SLAResult, error) {
+    
+    windowDays := getOrDefaultInt32(config.WindowDays, 7)
+    minSuccessRate := getOrDefaultFloat64(config.MinSuccessRate, 95.0)
+    
+    successRate, err := a.store.GetSuccessRate(ctx, cronJob, int(windowDays))
+    if err != nil {
+        return nil, err
+    }
+    
+    if successRate < minSuccessRate {
+        result.Violations = append(result.Violations, Violation{
+            Type:      "SuccessRate",
+            Message:   fmt.Sprintf("Success rate %.1f%% is below %.1f%% threshold", 
+                                   successRate, minSuccessRate),
+            Current:   successRate,
+            Threshold: minSuccessRate,
+        })
+    }
+}
+```
+
+### Alert Example
+
+When success rate falls below threshold:
+
+```yaml
+type: SLABreached
+severity: warning  # Configurable via severityOverrides
+message: "Success rate 92.3% is below 95.0% threshold"
+context:
+  successRate: 92.3
+  totalRuns: 65
+  successfulRuns: 60
+  failedRuns: 5
+```
+
+## Duration Percentiles
+
+CronJob Guardian tracks execution durations and calculates percentiles:
+
+- **P50 (Median)**: 50% of executions complete within this time
+- **P95**: 95% of executions complete within this time (common SLA metric)
+- **P99**: 99% of executions complete within this time (detects outliers)
+
+### Metrics Structure
+
+```go
+// From api/v1alpha1/cronjobmonitor_types.go:445-460
+type CronJobMetrics struct {
+    SuccessRate        float64  // Percentage
+    TotalRuns          int32
+    SuccessfulRuns     int32
+    FailedRuns         int32
+    AvgDurationSeconds float64
+    P50DurationSeconds float64  // Median
+    P95DurationSeconds float64  // 95th percentile
+    P99DurationSeconds float64  // 99th percentile
+}
+```
+
+These metrics are calculated from the `duration_seconds` column in the database:
+
+```sql
+-- Simplified query for P95
+SELECT PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds)
+FROM job_executions
+WHERE cronjob_namespace = ? 
+  AND cronjob_name = ?
+  AND start_time >= NOW() - INTERVAL ? DAY
+  AND succeeded = true
+```
+
+### Viewing Metrics
+
+Metrics are exposed in the CronJobMonitor status:
+
+```bash
+kubectl get cronjobmonitor my-monitor -o yaml
+```
+
+```yaml
+status:
+  cronJobs:
+    - name: daily-backup
+      namespace: production
+      metrics:
+        successRate: 98.5
+        totalRuns: 30
+        successfulRuns: 29
+        failedRuns: 1
+        avgDurationSeconds: 920     # 15m20s average
+        p50DurationSeconds: 900     # 15m median
+        p95DurationSeconds: 950     # 15m50s at P95
+        p99DurationSeconds: 980     # 16m20s at P99
+```
+
+Also available via Prometheus:
+
+```promql
+guardian_cronjob_success_rate{namespace="production", cronjob="daily-backup"}
+guardian_cronjob_duration_seconds{namespace="production", cronjob="daily-backup", quantile="0.95"}
+```
+
+## Maximum Duration Alerts
+
+Alert when any single execution exceeds a threshold:
+
+```yaml
+sla:
+  enabled: true
+  maxDuration: 30m  # Alert if job runs > 30 minutes
+```
+
+<ParamField path="maxDuration" type="duration">
+  Alert if any job execution exceeds this duration.
+  
+  **Use cases:**
+  - Detect hung jobs before they hit `activeDeadlineSeconds`
+  - Enforce performance SLAs
+  - Identify resource contention or degradation
+</ParamField>
+
+### Implementation
+
+The analyzer checks the last execution's duration:
+
+```go
+// From internal/analyzer/sla.go:143-156
+if config.MaxDuration != nil {
+    lastExec, err := a.store.GetLastExecution(ctx, cronJob)
+    if err == nil && lastExec != nil {
+        if lastExec.Duration() > config.MaxDuration.Duration {
+            result.Violations = append(result.Violations, Violation{
+                Type:      "MaxDuration",
+                Message:   fmt.Sprintf("Last duration %s exceeded max %s", 
+                                       lastExec.Duration(), config.MaxDuration.Duration),
+                Current:   lastExec.Duration().Seconds(),
+                Threshold: config.MaxDuration.Seconds(),
+            })
+        }
+    }
+}
+```
+
+### Alert Example
+
+```yaml
+type: MaxDuration
+severity: warning
+message: "Last duration 45m32s exceeded max 30m0s"
+context:
+  lastDuration: 2732s  # 45m32s
+```
+
+## Regression Detection
+
+Automatically detect when job performance degrades by comparing recent P95 duration against a baseline.
+
+### How It Works
+
+<Steps>
+  <Step title="Calculate Baseline P95">
+    Compute P95 duration over a baseline window (default: 14 days):
+    
+    ```go
+    baselineP95, err := a.store.GetDurationPercentile(ctx, cronJob, 95, baselineWindowDays)
+    ```
+  </Step>
+  
+  <Step title="Calculate Recent P95">
+    Compute P95 duration over a recent window (1 day):
+    
+    ```go
+    currentP95, err := a.store.GetDurationPercentile(ctx, cronJob, 95, 1)
+    ```
+  </Step>
+  
+  <Step title="Calculate Percentage Increase">
+    ```go
+    increase := (currentP95 - baselineP95) / baselineP95 * 100
+    ```
+  </Step>
+  
+  <Step title="Compare to Threshold">
+    If the increase exceeds the threshold, trigger an alert:
+    
+    ```go
+    if increase >= threshold {
+        result.Detected = true
+        result.Message = fmt.Sprintf("P95 duration increased %.0f%% (from %s to %s)",
+                                     increase, baselineP95, currentP95)
+    }
+    ```
+  </Step>
+</Steps>
+
+### Configuration
+
+```yaml
+sla:
+  enabled: true
+  durationRegressionThreshold: 50   # Alert on 50% slowdown
+  durationBaselineWindowDays: 14    # 2-week baseline
+```
+
+<ParamField path="durationRegressionThreshold" type="int32" default="50">
+  Alert if P95 duration increases by this percentage (1-1000).
+  
+  **Recommended values:**
+  - Sensitive (detect minor regressions): `20` - `30`
+  - Balanced: `50` (default)
+  - Conservative (only major regressions): `100` - `200`
+</ParamField>
+
+<ParamField path="durationBaselineWindowDays" type="int32" default="14">
+  Window size in days for calculating baseline P95.
+  
+  **Trade-offs:**
+  - Shorter baseline (7 days): More sensitive to recent changes
+  - Longer baseline (30 days): More stable, detects long-term trends
+</ParamField>
+
+### Implementation
+
+```go
+// From internal/analyzer/sla.go:252-293
+func (a *analyzer) CheckDurationRegression(ctx context.Context, 
+    cronJob types.NamespacedName, 
+    config *v1alpha1.SLAConfig) (*RegressionResult, error) {
+    
+    threshold := float64(getOrDefaultInt32(config.DurationRegressionThreshold, 50))
+    baselineWindowDays := int(getOrDefaultInt32(config.DurationBaselineWindowDays, 14))
+    recentWindowDays := 1
+    
+    baselineP95, _ := a.store.GetDurationPercentile(ctx, cronJob, 95, baselineWindowDays)
+    currentP95, _ := a.store.GetDurationPercentile(ctx, cronJob, 95, recentWindowDays)
+    
+    if baselineP95 == 0 {
+        return &RegressionResult{Detected: false}, nil
+    }
+    
+    if currentP95 > baselineP95 {
+        increase := (float64(currentP95) - float64(baselineP95)) / float64(baselineP95) * 100
+        if increase >= threshold {
+            result.Detected = true
+            result.PercentageIncrease = increase
+            result.Message = fmt.Sprintf("P95 duration increased %.0f%% (from %s to %s)",
+                                         increase, baselineP95, currentP95)
+        }
+    }
+}
+```
+
+### Alert Example
+
+```yaml
+type: DurationRegression
+severity: warning
+message: "P95 duration increased 67% (from 15m to 25m)"
+context:
+  baselineP95: 900s   # 15m
+  currentP95: 1500s   # 25m
+  percentageIncrease: 66.7
+  threshold: 50
+```
+
+<Info>
+  Regression detection requires sufficient execution history. With only a few recent executions, percentiles may be unstable. The analyzer gracefully handles this by returning `Detected: false` when baseline P95 is 0 (insufficient data).
+</Info>
+
+## Data Collection
+
+Execution data is collected by the Job Handler when Jobs complete:
+
+```go
+// Simplified from internal/controller/job_handler.go
+type JobExecution struct {
+    CronJobNamespace string
+    CronJobName      string
+    JobName          string
+    StartTime        time.Time
+    CompletionTime   time.Time
+    Succeeded        bool
+    ExitCode         int32
+    Reason           string
+    Logs             string
+}
+
+func (exec *JobExecution) Duration() time.Duration {
+    if exec.CompletionTime.IsZero() {
+        return 0
+    }
+    return exec.CompletionTime.Sub(exec.StartTime)
+}
+```
+
+Durations are stored in the database as `duration_seconds` for efficient percentile calculations.
+
+## Performance Considerations
+
+### Database Indexes
+
+SLA queries rely on indexes for performance:
+
+```sql
+CREATE INDEX idx_job_executions_lookup 
+  ON job_executions(cronjob_namespace, cronjob_name, start_time DESC);
+
+CREATE INDEX idx_job_executions_metrics 
+  ON job_executions(cronjob_namespace, cronjob_name, succeeded, start_time);
+```
+
+### Query Optimization
+
+Percentile calculations use window functions for efficiency:
+
+```sql
+-- PostgreSQL implementation
+SELECT 
+  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY duration_seconds) AS p50,
+  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_seconds) AS p95,
+  PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY duration_seconds) AS p99
+FROM job_executions
+WHERE cronjob_namespace = $1 
+  AND cronjob_name = $2
+  AND start_time >= $3
+  AND succeeded = true
+```
+
+For SQLite (development/small deployments), percentiles are calculated in-memory:
+
+```go
+// Simplified SQLite fallback
+durations := []float64{} // Fetch all durations
+sort.Float64s(durations)
+p95Index := int(0.95 * float64(len(durations)))
+p95 := durations[p95Index]
+```
+
+## Examples
+
+### Critical Backup Jobs
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: database-backups
+spec:
+  selector:
+    matchLabels:
+      type: backup
+  sla:
+    enabled: true
+    minSuccessRate: 100        # Zero tolerance for failures
+    windowDays: 30             # 30-day window
+    maxDuration: 1h            # Backups must complete in 1 hour
+  alerting:
+    channelRefs:
+      - name: pagerduty-dba
+        severities: [critical]
+    severityOverrides:
+      slaBreached: critical    # Any SLA violation is critical
+```
+
+### Performance-Sensitive ETL
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: etl-pipeline
+spec:
+  selector:
+    matchLabels:
+      type: etl
+  sla:
+    enabled: true
+    minSuccessRate: 95
+    durationRegressionThreshold: 30  # Sensitive to slowdowns
+    durationBaselineWindowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-data-team
+    severityOverrides:
+      durationRegression: warning
+```
+
+### Non-Critical Automation
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: cleanup-jobs
+spec:
+  selector:
+    matchLabels:
+      tier: low-priority
+  sla:
+    enabled: true
+    minSuccessRate: 90         # More tolerant
+    windowDays: 14
+    durationRegressionThreshold: 100  # Only major regressions
+  alerting:
+    severityOverrides:
+      slaBreached: warning
+      durationRegression: warning
+```
+
+## Monitoring Metrics
+
+All SLA metrics are exposed via Prometheus:
+
+```promql
+# Success rate (0-100)
+guardian_cronjob_success_rate{namespace="production", cronjob="daily-backup"}
+
+# Duration percentiles (seconds)
+guardian_cronjob_duration_seconds{namespace="production", cronjob="daily-backup", quantile="0.50"}
+guardian_cronjob_duration_seconds{namespace="production", cronjob="daily-backup", quantile="0.95"}
+guardian_cronjob_duration_seconds{namespace="production", cronjob="daily-backup", quantile="0.99"}
+
+# Total runs in window
+guardian_cronjob_total_runs{namespace="production", cronjob="daily-backup"}
+
+# Failed runs in window
+guardian_cronjob_failed_runs{namespace="production", cronjob="daily-backup"}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Metrics show 0% success rate for new CronJobs">
+    **Cause**: No execution history yet.
+    
+    **Solution**: Wait for the CronJob to run at least once. The analyzer requires at least one completed execution to calculate metrics.
+  </Accordion>
+  
+  <Accordion title="Regression alerts immediately after deployment">
+    **Cause**: Code changes often increase initial execution time (cache warming, etc.).
+    
+    **Solution**: Use a longer baseline window or increase the threshold temporarily:
+    ```yaml
+    sla:
+      durationRegressionThreshold: 100  # 100% increase allowed
+      durationBaselineWindowDays: 30    # Longer baseline
+    ```
+  </Accordion>
+  
+  <Accordion title="Unstable P95 values">
+    **Cause**: Insufficient executions in the window (e.g., weekly jobs only have 4 data points in a 30-day window).
+    
+    **Solution**: 
+    - Reduce `windowDays` for infrequent jobs
+    - Use P50 (median) instead of P95 for small sample sizes
+    - Increase `durationRegressionThreshold` to reduce sensitivity
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Dead-Man's Switch" icon="heart-pulse" href="/concepts/dead-man-switch">
+    Detect missed schedules
+  </Card>
+  <Card title="Alert Configuration" icon="bell" href="/concepts/cronjob-monitor#alerting">
+    Customize alert behavior
+  </Card>
+  <Card title="Data Retention" icon="database" href="/api/cronjobmonitor#data-retention">
+    Configure execution history retention
+  </Card>
+  <Card title="Prometheus Integration" icon="chart-line" href="/operations/prometheus-metrics">
+    Export metrics for dashboards
+  </Card>
+</CardGroup>

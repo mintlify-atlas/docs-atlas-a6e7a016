@@ -1,0 +1,560 @@
+---
+title: CronJobMonitor CRD
+description: Complete reference for the CronJobMonitor custom resource definition
+---
+
+## Overview
+
+The `CronJobMonitor` is the primary custom resource for defining monitoring policies. It specifies:
+- Which CronJobs to monitor (via selectors)
+- What conditions trigger alerts (dead-man's switch, SLA thresholds)
+- Where to send alerts (via channel references)
+- How to handle data retention and lifecycle
+
+## Basic Example
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: critical-jobs
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      tier: critical
+  deadManSwitch:
+    enabled: true
+    maxTimeSinceLastSuccess: 25h
+  sla:
+    enabled: true
+    minSuccessRate: 99
+    windowDays: 7
+  alerting:
+    channelRefs:
+      - name: slack-ops
+```
+
+## Spec Fields
+
+### selector
+
+Defines which CronJobs to monitor. An empty selector matches all CronJobs in the monitor's namespace.
+
+```go
+// From api/v1alpha1/cronjobmonitor_types.go:38-67
+type CronJobSelector struct {
+    MatchLabels          map[string]string
+    MatchExpressions     []metav1.LabelSelectorRequirement
+    MatchNames           []string
+    Namespaces           []string
+    NamespaceSelector    *metav1.LabelSelector
+    AllNamespaces        bool
+}
+```
+
+<Accordion title="matchLabels">
+  Selects CronJobs with exact label matches:
+  
+  ```yaml
+  selector:
+    matchLabels:
+      tier: critical
+      environment: production
+  ```
+  
+  All specified labels must match (logical AND).
+</Accordion>
+
+<Accordion title="matchExpressions">
+  Selects CronJobs using label selector expressions:
+  
+  ```yaml
+  selector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: [critical, high]
+      - key: team
+        operator: Exists
+  ```
+  
+  Supported operators: `In`, `NotIn`, `Exists`, `DoesNotExist`
+</Accordion>
+
+<Accordion title="matchNames">
+  Explicitly lists CronJob names to monitor:
+  
+  ```yaml
+  selector:
+    matchNames:
+      - daily-backup
+      - weekly-report
+  ```
+  
+  Only valid when watching a single namespace. Combines with label selectors using AND logic.
+</Accordion>
+
+<Accordion title="namespaces">
+  Specifies namespaces to watch:
+  
+  ```yaml
+  selector:
+    namespaces:
+      - production
+      - staging
+  ```
+  
+  The monitor will watch CronJobs matching label selectors in any of these namespaces.
+</Accordion>
+
+<Accordion title="namespaceSelector">
+  Selects namespaces dynamically by labels:
+  
+  ```yaml
+  selector:
+    namespaceSelector:
+      matchLabels:
+        monitoring: enabled
+  ```
+  
+  The monitor will watch all namespaces with `monitoring=enabled` label.
+</Accordion>
+
+<Accordion title="allNamespaces">
+  Enables cluster-wide monitoring:
+  
+  ```yaml
+  selector:
+    allNamespaces: true
+    matchLabels:
+      critical: "true"
+  ```
+  
+  Watches all CronJobs matching label selectors across all namespaces. Takes precedence over `namespaces` and `namespaceSelector`.
+</Accordion>
+
+### deadManSwitch
+
+Configures dead-man's switch alerting when jobs don't run on time.
+
+```go
+// From api/v1alpha1/cronjobmonitor_types.go:69-98
+type DeadManSwitchConfig struct {
+    Enabled                 *bool
+    MaxTimeSinceLastSuccess *metav1.Duration
+    AutoFromSchedule        *AutoScheduleConfig
+}
+
+type AutoScheduleConfig struct {
+    Enabled                 bool
+    Buffer                  *metav1.Duration
+    MissedScheduleThreshold *int32
+}
+```
+
+<AccordionGroup>
+  <Accordion title="enabled">
+    Enables/disables dead-man's switch monitoring. Default: `true`
+    
+    ```yaml
+    deadManSwitch:
+      enabled: false  # Disable for this monitor
+    ```
+  </Accordion>
+  
+  <Accordion title="maxTimeSinceLastSuccess">
+    Fixed time window for detecting missed runs:
+    
+    ```yaml
+    deadManSwitch:
+      maxTimeSinceLastSuccess: 25h  # Alert if no success in 25 hours
+    ```
+    
+    Use this for jobs with predictable schedules. For a daily job at midnight, set to `25h` (24h + 1h buffer).
+  </Accordion>
+  
+  <Accordion title="autoFromSchedule">
+    Auto-calculates expected interval from the CronJob's schedule:
+    
+    ```yaml
+    deadManSwitch:
+      autoFromSchedule:
+        enabled: true
+        buffer: 1h                    # Extra time beyond schedule interval
+        missedScheduleThreshold: 2    # Alert after missing 2 runs
+    ```
+    
+    The controller parses the cron expression (e.g., `0 0 * * *`) and calculates the interval between runs. The buffer accounts for execution time and scheduling delays.
+    
+    <Warning>
+      Auto-detection requires a parseable cron schedule. Complex expressions or timezone-specific schedules may produce incorrect intervals.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+### sla
+
+Configures SLA tracking for success rates and execution durations.
+
+```go
+// From api/v1alpha1/cronjobmonitor_types.go:100-131
+type SLAConfig struct {
+    Enabled                      *bool
+    MinSuccessRate               *float64
+    WindowDays                   *int32
+    MaxDuration                  *metav1.Duration
+    DurationRegressionThreshold  *int32
+    DurationBaselineWindowDays   *int32
+}
+```
+
+<ParamField path="enabled" type="bool" default="true">
+  Enables SLA tracking and alerting.
+</ParamField>
+
+<ParamField path="minSuccessRate" type="float64" default="95.0">
+  Minimum acceptable success rate percentage (0-100).
+  
+  ```yaml
+  sla:
+    minSuccessRate: 99  # 99% uptime requirement
+  ```
+</ParamField>
+
+<ParamField path="windowDays" type="int32" default="7">
+  Rolling window size in days for calculating success rate.
+  
+  ```yaml
+  sla:
+    windowDays: 30  # 30-day rolling window
+  ```
+</ParamField>
+
+<ParamField path="maxDuration" type="duration">
+  Alert if any job execution exceeds this duration.
+  
+  ```yaml
+  sla:
+    maxDuration: 30m  # Alert if job runs longer than 30 minutes
+  ```
+</ParamField>
+
+<ParamField path="durationRegressionThreshold" type="int32" default="50">
+  Alert if P95 duration increases by this percentage.
+  
+  ```yaml
+  sla:
+    durationRegressionThreshold: 50  # Alert on 50% slowdown
+  ```
+  
+  See [SLA Tracking](/concepts/sla-tracking#regression-detection) for details.
+</ParamField>
+
+<ParamField path="durationBaselineWindowDays" type="int32" default="14">
+  Window size for calculating baseline duration for regression detection.
+  
+  ```yaml
+  sla:
+    durationBaselineWindowDays: 14  # 2-week baseline
+  ```
+</ParamField>
+
+### suspendedHandling
+
+Configures behavior when CronJobs are suspended.
+
+```yaml
+suspendedHandling:
+  pauseMonitoring: true           # Stop monitoring when suspended
+  alertIfSuspendedFor: 168h       # Alert if suspended > 7 days
+```
+
+<Info>
+  Suspended CronJobs don't create new Jobs. Setting `pauseMonitoring: true` prevents false alarms from dead-man's switch during planned suspensions.
+</Info>
+
+### maintenanceWindows
+
+Defines scheduled maintenance periods to suppress alerts.
+
+```yaml
+maintenanceWindows:
+  - name: weekly-maintenance
+    schedule: "0 2 * * 0"         # Every Sunday at 2 AM
+    duration: 4h
+    timezone: America/New_York
+    suppressAlerts: true
+```
+
+<ParamField path="schedule" type="string" required>
+  Cron expression for when the window starts.
+</ParamField>
+
+<ParamField path="duration" type="duration" required>
+  How long the maintenance window lasts.
+</ParamField>
+
+<ParamField path="timezone" type="string" default="UTC">
+  Timezone for the schedule (e.g., `America/New_York`, `Europe/London`).
+</ParamField>
+
+<ParamField path="suppressAlerts" type="bool" default="true">
+  Whether to suppress alert dispatch during this window.
+</ParamField>
+
+### alerting
+
+Configures alert channels and behavior.
+
+```go
+// From api/v1alpha1/cronjobmonitor_types.go:164-197
+type AlertingConfig struct {
+    Enabled                 *bool
+    ChannelRefs             []ChannelRef
+    IncludeContext          *AlertContext
+    SuppressDuplicatesFor   *metav1.Duration
+    AlertDelay              *metav1.Duration
+    SeverityOverrides       *SeverityOverrides
+    SuggestedFixPatterns    []SuggestedFixPattern
+}
+```
+
+<Accordion title="channelRefs">
+  References to `AlertChannel` CRs (cluster-scoped):
+  
+  ```yaml
+  alerting:
+    channelRefs:
+      - name: pagerduty-oncall
+        severities: [critical]       # Only critical alerts
+      - name: slack-ops
+        severities: [critical, warning]  # All actionable alerts
+  ```
+  
+  <Note>
+    Only `critical` and `warning` severities are supported. Info-level notifications are not part of the alerting model.
+  </Note>
+</Accordion>
+
+<Accordion title="suppressDuplicatesFor">
+  Time window to suppress duplicate alerts:
+  
+  ```yaml
+  alerting:
+    suppressDuplicatesFor: 1h  # Don't re-alert within 1 hour
+  ```
+  
+  Duplicate suppression is bypassed if the error signature changes (e.g., OOM → connection timeout).
+</Accordion>
+
+<Accordion title="alertDelay">
+  Delays alert dispatch to allow transient issues to resolve:
+  
+  ```yaml
+  alerting:
+    alertDelay: 5m  # Wait 5 minutes before sending
+  ```
+  
+  If the job succeeds before the delay expires, the pending alert is cancelled. Useful for flaky jobs.
+</Accordion>
+
+<Accordion title="severityOverrides">
+  Customizes alert severity per type:
+  
+  ```yaml
+  alerting:
+    severityOverrides:
+      jobFailed: critical
+      slaBreached: warning
+      missedSchedule: warning
+      deadManTriggered: critical
+      durationRegression: warning
+  ```
+  
+  Valid severities: `critical`, `warning`
+</Accordion>
+
+<Accordion title="includeContext">
+  Specifies what context to include in alerts:
+  
+  ```yaml
+  alerting:
+    includeContext:
+      logs: true
+      logLines: 100
+      logContainerName: main
+      includeInitContainerLogs: false
+      events: true
+      podStatus: true
+      suggestedFixes: true
+  ```
+  
+  <ParamField path="logs" type="bool" default="true">
+    Include pod logs in alerts.
+  </ParamField>
+  
+  <ParamField path="logLines" type="int32" default="50">
+    Number of log lines to include (1-10000).
+  </ParamField>
+  
+  <ParamField path="logContainerName" type="string">
+    Specific container for logs. Default: first container.
+  </ParamField>
+  
+  <ParamField path="events" type="bool" default="true">
+    Include Kubernetes events related to the pod.
+  </ParamField>
+  
+  <ParamField path="podStatus" type="bool" default="true">
+    Include pod status details (phase, container states).
+  </ParamField>
+  
+  <ParamField path="suggestedFixes" type="bool" default="true">
+    Include AI-generated fix suggestions.
+  </ParamField>
+</Accordion>
+
+<Accordion title="suggestedFixPatterns">
+  Custom patterns for suggesting fixes:
+  
+  ```yaml
+  alerting:
+    suggestedFixPatterns:
+      - name: custom-oom
+        match:
+          exitCode: 137
+        suggestion: "Increase memory limits for {\{.Namespace}\}/{\{.Name}\}"
+        priority: 150  # Higher than built-ins (1-100)
+      - name: connection-timeout
+        match:
+          logPattern: "connection timed out|ETIMEDOUT"
+        suggestion: "Check network connectivity to external services"
+        priority: 50
+  ```
+  
+  Available template variables: `{\{.Namespace}\}`, `{\{.Name}\}`, `{\{.ExitCode}\}`, `{\{.Reason}\}`, `{\{.JobName}\}`
+  
+  Match criteria (at least one required):
+  - `exitCode`: Exact exit code
+  - `exitCodeRange`: Range [min, max] inclusive
+  - `reason`: Container termination reason (case-insensitive)
+  - `reasonPattern`: Regex pattern for reason
+  - `logPattern`: Regex pattern for log content
+  - `eventPattern`: Regex pattern for event messages
+</Accordion>
+
+### dataRetention
+
+Configures data lifecycle management.
+
+```yaml
+dataRetention:
+  retentionDays: 60
+  onCronJobDeletion: purge-after-days
+  purgeAfterDays: 7
+  onRecreation: retain
+  storeLogs: true
+  logRetentionDays: 30
+  maxLogSizeKB: 200
+  storeEvents: true
+```
+
+<ParamField path="retentionDays" type="int32">
+  Days to retain execution history. Overrides global setting.
+</ParamField>
+
+<ParamField path="onCronJobDeletion" type="string" default="retain">
+  Behavior when a monitored CronJob is deleted:
+  - `retain`: Keep execution history
+  - `purge`: Delete immediately
+  - `purge-after-days`: Delete after `purgeAfterDays`
+</ParamField>
+
+<ParamField path="onRecreation" type="string" default="retain">
+  Behavior when a CronJob is recreated (detected via UID change):
+  - `retain`: Keep old history
+  - `reset`: Delete history from old UID
+</ParamField>
+
+<ParamField path="storeLogs" type="bool">
+  Store job logs in database. Overrides global `--storage.log-storage-enabled`.
+</ParamField>
+
+<ParamField path="logRetentionDays" type="int32">
+  Days to retain logs. Defaults to `retentionDays`.
+</ParamField>
+
+<ParamField path="maxLogSizeKB" type="int32">
+  Max log size per execution in KB. Overrides global `--storage.max-log-size-kb`.
+</ParamField>
+
+## Status Fields
+
+The controller updates the status with observed state:
+
+```yaml
+status:
+  observedGeneration: 1
+  phase: Active
+  lastReconcileTime: "2026-03-04T10:30:00Z"
+  summary:
+    totalCronJobs: 5
+    healthy: 3
+    warning: 1
+    critical: 1
+    suspended: 0
+    running: 2
+    activeAlerts: 2
+  cronJobs:
+    - name: daily-backup
+      namespace: production
+      status: healthy
+      suspended: false
+      lastSuccessfulTime: "2026-03-04T00:00:00Z"
+      lastRunDuration: 15m30s
+      nextScheduledTime: "2026-03-05T00:00:00Z"
+      metrics:
+        successRate: 98.5
+        totalRuns: 30
+        successfulRuns: 29
+        failedRuns: 1
+        avgDurationSeconds: 920
+        p50DurationSeconds: 900
+        p95DurationSeconds: 950
+        p99DurationSeconds: 980
+      activeAlerts: []
+```
+
+<ResponseField name="phase" type="string">
+  Monitor operational state: `Initializing`, `Active`, `Degraded`, `Error`
+</ResponseField>
+
+<ResponseField name="summary" type="object">
+  Aggregate counts across all monitored CronJobs.
+</ResponseField>
+
+<ResponseField name="cronJobs[]" type="array">
+  Per-CronJob status including metrics and active alerts.
+</ResponseField>
+
+## Full Example
+
+See the [full-featured example](https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/examples/monitors/full-featured.yaml) for all configuration options.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Dead-Man's Switch" icon="heart-pulse" href="/concepts/dead-man-switch">
+    Learn how missed schedule detection works
+  </Card>
+  <Card title="SLA Tracking" icon="chart-mixed" href="/concepts/sla-tracking">
+    Understand success rate and regression detection
+  </Card>
+  <Card title="Alert Channels" icon="satellite-dish" href="/concepts/alert-channels">
+    Configure Slack, PagerDuty, email, and webhooks
+  </Card>
+  <Card title="Examples" icon="code" href="/examples/basic-monitor">
+    Browse real-world monitor configurations
+  </Card>
+</CardGroup>

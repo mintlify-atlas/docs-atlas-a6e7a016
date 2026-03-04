@@ -1,0 +1,488 @@
+---
+title: AlertChannel CRD
+description: Configure notification channels for Slack, PagerDuty, email, and webhooks
+---
+
+## Overview
+
+The `AlertChannel` custom resource defines how and where to send alerts. AlertChannels are **cluster-scoped** resources that can be referenced by any CronJobMonitor.
+
+```go
+// From api/v1alpha1/alertchannel_types.go:7-36
+type AlertChannelSpec struct {
+    Type          string               // slack, pagerduty, webhook, email
+    Slack         *SlackConfig
+    PagerDuty     *PagerDutyConfig
+    Webhook       *WebhookConfig
+    Email         *EmailConfig
+    RateLimiting  *RateLimitConfig
+    TestOnSave    bool
+}
+```
+
+## Channel Types
+
+<CardGroup cols={2}>
+  <Card title="Slack" icon="slack">
+    Send rich formatted alerts to Slack channels via webhooks
+  </Card>
+  <Card title="PagerDuty" icon="pager">
+    Create incidents in PagerDuty for on-call escalation
+  </Card>
+  <Card title="Email" icon="envelope">
+    Deliver alerts via SMTP email with custom templates
+  </Card>
+  <Card title="Webhook" icon="webhook">
+    POST alerts to any HTTP endpoint with custom payloads
+  </Card>
+</CardGroup>
+
+## Slack
+
+Send alerts to Slack channels using incoming webhooks.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: slack-alerts
+spec:
+  type: slack
+  slack:
+    webhookSecretRef:
+      name: slack-webhook
+      namespace: cronjob-guardian
+      key: url
+    defaultChannel: "#alerts"
+    messageTemplate: |
+      :rotating_light: *{\{ .Severity | upper }\}*: {\{ .Title }\}
+      
+      *CronJob:* `{\{ .CronJob.Namespace }\}/{\{ .CronJob.Name }\}`
+      *Monitor:* `{\{ .MonitorRef.Namespace }\}/{\{ .MonitorRef.Name }\}`
+      
+      {\{ .Message }\}
+      
+      {\{ if .Context.SuggestedFix }\}
+      :bulb: *Suggested Fix:* {\{ .Context.SuggestedFix }\}
+      {\{ end }\}
+  rateLimiting:
+    maxAlertsPerHour: 100
+    burstLimit: 10
+```
+
+### Slack Configuration
+
+```go
+// From api/v1alpha1/alertchannel_types.go:38-50
+type SlackConfig struct {
+    WebhookSecretRef  NamespacedSecretKeyRef
+    DefaultChannel    string
+    MessageTemplate   string
+}
+```
+
+<ParamField path="webhookSecretRef" type="object" required>
+  Reference to a Secret containing the Slack webhook URL.
+  
+  Create the secret:
+  ```bash
+  kubectl create secret generic slack-webhook \
+    -n cronjob-guardian \
+    --from-literal=url='https://hooks.slack.com/services/YOUR/WEBHOOK/URL'
+  ```
+</ParamField>
+
+<ParamField path="defaultChannel" type="string">
+  Override the webhook's default channel (e.g., `#alerts`, `@username`).
+</ParamField>
+
+<ParamField path="messageTemplate" type="string">
+  Go template for custom message formatting. If not specified, uses a built-in template.
+  
+  Available variables:
+  - `{\{ .Type }\}` - Alert type (JobFailed, DeadManTriggered, etc.)
+  - `{\{ .Severity }\}` - critical or warning
+  - `{\{ .Title }\}` - Alert title
+  - `{\{ .Message }\}` - Alert message
+  - `{\{ .CronJob.Namespace }\}`, `{\{ .CronJob.Name }\}` - CronJob reference
+  - `{\{ .MonitorRef.Namespace }\}`, `{\{ .MonitorRef.Name }\}` - Monitor reference
+  - `{\{ .Context.Logs }\}` - Pod logs
+  - `{\{ .Context.Events }\}` - Kubernetes events (array)
+  - `{\{ .Context.SuggestedFix }\}` - Suggested fix text
+  - `{\{ .Context.ExitCode }\}` - Container exit code
+  - `{\{ .Context.Reason }\}` - Termination reason
+  
+  Template functions:
+  - `{\{ .Severity | upper }\}` - Uppercase
+  - `{\{ .Severity | lower }\}` - Lowercase
+  - `{\{ .Message | truncate 100 }\}` - Truncate to N chars
+  - `{\{ formatTime .Timestamp "RFC3339" }\}` - Format time
+</ParamField>
+
+## PagerDuty
+
+Create incidents in PagerDuty for on-call escalation.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: pagerduty-oncall
+spec:
+  type: pagerduty
+  pagerduty:
+    routingKeySecretRef:
+      name: pagerduty-key
+      namespace: cronjob-guardian
+      key: routing-key
+    severity: error  # PagerDuty severity: critical, error, warning, info
+```
+
+### PagerDuty Configuration
+
+```go
+// From api/v1alpha1/alertchannel_types.go:52-61
+type PagerDutyConfig struct {
+    RoutingKeySecretRef  NamespacedSecretKeyRef
+    Severity             string  // critical, error, warning, info
+}
+```
+
+<ParamField path="routingKeySecretRef" type="object" required>
+  Reference to a Secret containing the PagerDuty integration/routing key.
+  
+  Create the secret:
+  ```bash
+  kubectl create secret generic pagerduty-key \
+    -n cronjob-guardian \
+    --from-literal=routing-key='YOUR_ROUTING_KEY'
+  ```
+</ParamField>
+
+<ParamField path="severity" type="string" default="error">
+  Default PagerDuty severity. Valid values: `critical`, `error`, `warning`, `info`.
+  
+  The dispatcher maps CronJob Guardian severities to PagerDuty:
+  - Guardian `critical` → PagerDuty `critical`
+  - Guardian `warning` → PagerDuty configured severity (default: `error`)
+</ParamField>
+
+<Info>
+  PagerDuty incidents include dedup_key based on the alert key, so repeated alerts update the same incident instead of creating duplicates.
+</Info>
+
+## Email
+
+Send alerts via SMTP email with customizable templates.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: email-team
+spec:
+  type: email
+  email:
+    smtpSecretRef:
+      name: smtp-credentials
+      namespace: cronjob-guardian
+    from: guardian@example.com
+    to:
+      - ops-team@example.com
+      - oncall@example.com
+    subjectTemplate: "[{\{ .Severity | upper }\}] {\{ .CronJob.Name }\} - {\{ .Type }\}"
+    bodyTemplate: |
+      Alert Type: {\{ .Type }\}
+      Severity: {\{ .Severity }\}
+      
+      CronJob: {\{ .CronJob.Namespace }\}/{\{ .CronJob.Name }\}
+      Monitor: {\{ .MonitorRef.Namespace }\}/{\{ .MonitorRef.Name }\}
+      
+      {\{ .Message }\}
+      
+      {\{ if .Context.SuggestedFix }\}
+      Suggested Fix:
+      {\{ .Context.SuggestedFix }\}
+      {\{ end }\}
+      
+      {\{ if .Context.Logs }\}
+      Recent Logs:
+      {\{ .Context.Logs }\}
+      {\{ end }\}
+```
+
+### Email Configuration
+
+```go
+// From api/v1alpha1/alertchannel_types.go:82-100
+type EmailConfig struct {
+    SMTPSecretRef    NamespacedSecretRef
+    From             string
+    To               []string
+    SubjectTemplate  string
+    BodyTemplate     string
+}
+```
+
+<ParamField path="smtpSecretRef" type="object" required>
+  Reference to a Secret containing SMTP configuration.
+  
+  Required secret keys:
+  - `host` - SMTP server hostname
+  - `port` - SMTP server port (e.g., "587")
+  - `username` - SMTP username
+  - `password` - SMTP password
+  
+  Create the secret:
+  ```bash
+  kubectl create secret generic smtp-credentials \
+    -n cronjob-guardian \
+    --from-literal=host='smtp.gmail.com' \
+    --from-literal=port='587' \
+    --from-literal=username='alerts@example.com' \
+    --from-literal=password='YOUR_PASSWORD'
+  ```
+</ParamField>
+
+<ParamField path="from" type="string" required>
+  Sender email address.
+</ParamField>
+
+<ParamField path="to" type="string[]" required>
+  List of recipient email addresses.
+</ParamField>
+
+<ParamField path="subjectTemplate" type="string">
+  Go template for email subject. Defaults to: `CronJob Guardian Alert: {\{ .CronJob.Name }\}`
+</ParamField>
+
+<ParamField path="bodyTemplate" type="string">
+  Go template for email body. If not specified, uses a built-in template.
+</ParamField>
+
+## Webhook
+
+Send alerts to custom HTTP endpoints with flexible payload templates.
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: webhook-custom
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-url
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer ${TOKEN}
+    payloadTemplate: |
+      {
+        "alert_type": "{\{ .Type }\}",
+        "severity": "{\{ .Severity }\}",
+        "cronjob": "{\{ .CronJob.Namespace }\}/{\{ .CronJob.Name }\}",
+        "message": {\{ .Message | jsonEscape }\},
+        "timestamp": "{\{ formatTime .Timestamp "RFC3339" }\}",
+        "exit_code": {\{ .Context.ExitCode }\},
+        "suggested_fix": {\{ .Context.SuggestedFix | jsonEscape }\}
+      }
+```
+
+### Webhook Configuration
+
+```go
+// From api/v1alpha1/alertchannel_types.go:63-80
+type WebhookConfig struct {
+    URLSecretRef     NamespacedSecretKeyRef
+    Method           string  // POST, PUT
+    Headers          map[string]string
+    PayloadTemplate  string
+}
+```
+
+<ParamField path="urlSecretRef" type="object" required>
+  Reference to a Secret containing the webhook URL.
+  
+  Create the secret:
+  ```bash
+  kubectl create secret generic webhook-url \
+    -n cronjob-guardian \
+    --from-literal=url='https://api.example.com/alerts'
+  ```
+</ParamField>
+
+<ParamField path="method" type="string" default="POST">
+  HTTP method: `POST` or `PUT`.
+</ParamField>
+
+<ParamField path="headers" type="object">
+  Custom HTTP headers to include in requests.
+  
+  Environment variable substitution is supported:
+  ```yaml
+  headers:
+    Authorization: Bearer ${API_TOKEN}
+  ```
+</ParamField>
+
+<ParamField path="payloadTemplate" type="string">
+  Go template for the JSON payload. If not specified, sends a default structure.
+  
+  Use `{\{ .Field | jsonEscape }\}` for string fields to ensure proper JSON escaping.
+</ParamField>
+
+## Rate Limiting
+
+All channel types support rate limiting to prevent alert storms:
+
+```yaml
+rateLimiting:
+  maxAlertsPerHour: 100
+  burstLimit: 10
+```
+
+```go
+// From api/v1alpha1/alertchannel_types.go:115-126
+type RateLimitConfig struct {
+    MaxAlertsPerHour  *int32  // Default: 100
+    BurstLimit        *int32  // Default: 10
+}
+```
+
+<ParamField path="maxAlertsPerHour" type="int32" default="100">
+  Maximum alerts per hour for this channel.
+</ParamField>
+
+<ParamField path="burstLimit" type="int32" default="10">
+  Maximum alerts per minute (burst allowance).
+</ParamField>
+
+<Info>
+  Rate limits are per-channel. The global dispatcher also has rate limits (default: 50/min) that apply across all channels.
+</Info>
+
+## Test on Save
+
+Enable test alert dispatch when the AlertChannel is created or updated:
+
+```yaml
+spec:
+  testOnSave: true
+```
+
+This sends a test alert to verify configuration. The test result is reflected in the status:
+
+```yaml
+status:
+  ready: true
+  lastTestTime: "2026-03-04T10:30:00Z"
+  lastTestResult: success
+```
+
+## Status Fields
+
+The controller updates the status with operational metrics:
+
+```yaml
+status:
+  ready: true
+  lastTestTime: "2026-03-04T10:30:00Z"
+  lastTestResult: success
+  alertsSentTotal: 142
+  lastAlertTime: "2026-03-04T12:45:00Z"
+  alertsFailedTotal: 3
+  lastFailedTime: "2026-03-03T08:20:00Z"
+  lastFailedError: "connection timeout"
+  consecutiveFailures: 0
+```
+
+<ResponseField name="ready" type="bool">
+  Whether the channel is operational.
+</ResponseField>
+
+<ResponseField name="alertsSentTotal" type="int64">
+  Total alerts successfully sent via this channel since creation.
+</ResponseField>
+
+<ResponseField name="alertsFailedTotal" type="int64">
+  Total alerts that failed to send.
+</ResponseField>
+
+<ResponseField name="consecutiveFailures" type="int32">
+  Number of consecutive failures. Resets to 0 on successful send.
+</ResponseField>
+
+## Channel Lifecycle
+
+The AlertChannel controller:
+
+1. **Registration**: When an AlertChannel is created, the controller:
+   - Validates the configuration
+   - Fetches referenced secrets
+   - Registers the channel with the alert dispatcher
+   - Optionally sends a test alert (`testOnSave: true`)
+
+2. **Updates**: When an AlertChannel is updated:
+   - Re-validates configuration
+   - Re-fetches secrets (in case they changed)
+   - Updates the dispatcher's channel registry
+   - Optionally re-tests
+
+3. **Deletion**: When an AlertChannel is deleted:
+   - Removes from dispatcher registry
+   - In-flight alerts may still be delivered
+   - Pending (delayed) alerts referencing the channel are cancelled
+
+## Referencing Channels
+
+CronJobMonitors reference AlertChannels by name:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: my-monitor
+spec:
+  alerting:
+    channelRefs:
+      - name: slack-alerts
+        severities: [critical, warning]
+      - name: pagerduty-oncall
+        severities: [critical]
+```
+
+<Warning>
+  If a referenced AlertChannel doesn't exist, the monitor will log warnings but continue operating. Ensure channels are created before monitors reference them.
+</Warning>
+
+## Examples
+
+<CardGroup cols={2}>
+  <Card title="Slack Example" icon="slack" href="https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/examples/alertchannels/slack.yaml">
+    Complete Slack configuration
+  </Card>
+  <Card title="PagerDuty Example" icon="pager" href="https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/examples/alertchannels/pagerduty.yaml">
+    PagerDuty integration setup
+  </Card>
+  <Card title="Email Example" icon="envelope" href="https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/examples/alertchannels/email.yaml">
+    SMTP email configuration
+  </Card>
+  <Card title="Webhook Example" icon="webhook" href="https://github.com/iLLeniumStudios/cronjob-guardian/blob/main/examples/alertchannels/webhook.yaml">
+    Custom webhook integration
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="CronJobMonitor" icon="file-code" href="/concepts/cronjob-monitor">
+    Learn how to configure monitors
+  </Card>
+  <Card title="Alert Templates" icon="code" href="/guides/configuring-alerts">
+    Customize alert message formatting
+  </Card>
+</CardGroup>

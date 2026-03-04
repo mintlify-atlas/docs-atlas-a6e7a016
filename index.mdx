@@ -1,97 +1,240 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: CronJob Guardian
+description: Kubernetes operator for CronJob monitoring with SLA tracking, dead-man's switch detection, and intelligent alerting
+mode: custom
 ---
 
-## Setting up
+<div className="relative overflow-hidden bg-gradient-to-br from-[#1e40af] via-[#2563eb] to-[#3b82f6] dark:from-[#0f1117] dark:via-[#1a1d27] dark:to-[#242838] py-20">
+  <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGRlZnM+PHBhdHRlcm4gaWQ9ImdyaWQiIHdpZHRoPSI2MCIgaGVpZ2h0PSI2MCIgcGF0dGVyblVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHBhdGggZD0iTSAxMCAwIEwgMCAwIDAgMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS1vcGFjaXR5PSIwLjA1IiBzdHJva2Utd2lkdGg9IjEiLz48L3BhdHRlcm4+PC9kZWZzPjxyZWN0IHdpZHRoPSIxMDAlIiBoZWlnaHQ9IjEwMCUiIGZpbGw9InVybCgjZ3JpZCkiLz48L3N2Zz4=')] opacity-20"></div>
+  
+  <div className="relative max-w-7xl mx-auto px-6 lg:px-8">
+    <div className="grid lg:grid-cols-12 gap-12 items-center">
+      <div className="lg:col-span-7">
+        <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold text-white mb-6">
+          Never miss a <span className="text-blue-200">CronJob failure</span> again
+        </h1>
+        <p className="text-lg sm:text-xl text-blue-100 dark:text-gray-300 max-w-2xl mb-8">
+          Monitor your Kubernetes CronJobs with SLA tracking, dead-man's switch detection, and intelligent alerts. Get notified when jobs fail, miss their schedule, or regress in performance.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a 
+            href="/quickstart" 
+            className="inline-flex items-center px-6 py-3 rounded-lg bg-white text-[#2563eb] font-semibold hover:bg-blue-50 transition-colors shadow-lg"
+          >
+            Get Started
+            <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+            </svg>
+          </a>
+          <a 
+            href="/concepts/overview" 
+            className="inline-flex items-center px-6 py-3 rounded-lg border-2 border-white/30 bg-white/10 text-white font-semibold hover:bg-white/20 transition-colors backdrop-blur-sm"
+          >
+            Learn the Concepts
+          </a>
+        </div>
+      </div>
+      <div className="lg:col-span-5">
+        <div className="relative">
+          <div className="absolute inset-0 bg-gradient-to-r from-blue-500 to-purple-500 rounded-2xl blur-2xl opacity-20"></div>
+          <div className="relative bg-[#1a1d27] dark:bg-[#0f1117] rounded-2xl p-6 border border-white/10 shadow-2xl">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="w-3 h-3 rounded-full bg-red-500"></div>
+              <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
+              <div className="w-3 h-3 rounded-full bg-green-500"></div>
+            </div>
+            <pre className="text-sm text-gray-300 overflow-x-auto">
+              <code>{`apiVersion: guardian.illenium.net/v1alpha1
+kind: CronJobMonitor
+metadata:
+  name: backup-monitor
+spec:
+  selector:
+    matchLabels:
+      app: backup
+  deadManSwitch:
+    enabled: true
+    autoFromSchedule:
+      enabled: true
+  alerting:
+    channelRefs:
+      - name: slack-alerts`}</code>
+            </pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
-Get your documentation site up and running in minutes.
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Quick Start</h2>
+  <p className="text-lg text-gray-600 dark:text-gray-400 mb-8">Get CronJob Guardian running in your cluster in minutes</p>
+  
+  <Steps>
+    <Step title="Install via Helm">
+      Deploy the operator to your Kubernetes cluster using Helm:
+      
+      ```bash
+      helm install cronjob-guardian \
+        oci://ghcr.io/illeniumstudios/charts/cronjob-guardian \
+        --namespace cronjob-guardian \
+        --create-namespace
+      ```
+      
+      The operator will start monitoring CronJobs immediately.
+    </Step>
+    
+    <Step title="Configure alerts">
+      Set up a Slack alert channel to receive notifications:
+      
+      ```bash
+      kubectl create secret generic slack-webhook \
+        --namespace cronjob-guardian \
+        --from-literal=url=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+      ```
+      
+      ```yaml
+      apiVersion: guardian.illenium.net/v1alpha1
+      kind: AlertChannel
+      metadata:
+        name: slack-alerts
+        namespace: cronjob-guardian
+      spec:
+        type: slack
+        slack:
+          webhookSecretRef:
+            name: slack-webhook
+            namespace: cronjob-guardian
+            key: url
+      ```
+    </Step>
+    
+    <Step title="Create a monitor">
+      Monitor all CronJobs in a namespace with automatic dead-man's switch detection:
+      
+      ```yaml
+      apiVersion: guardian.illenium.net/v1alpha1
+      kind: CronJobMonitor
+      metadata:
+        name: production-monitor
+        namespace: production
+      spec:
+        selector: {}  # empty = all CronJobs in namespace
+        deadManSwitch:
+          enabled: true
+          autoFromSchedule:
+            enabled: true
+        alerting:
+          channelRefs:
+            - name: slack-alerts
+      ```
+      
+      Apply it with `kubectl apply -f monitor.yaml` and you'll be alerted when jobs fail or miss their schedule.
+    </Step>
+    
+    <Step title="Access the dashboard">
+      View real-time status and metrics in the built-in web dashboard:
+      
+      ```bash
+      kubectl port-forward -n cronjob-guardian svc/cronjob-guardian 8080:8080
+      ```
+      
+      Open [http://localhost:8080](http://localhost:8080) to see your CronJobs, SLA metrics, and alert history.
+    </Step>
+  </Steps>
+</div>
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Key Features</h2>
+  <p className="text-lg text-gray-600 dark:text-gray-400 mb-8">Everything you need to keep your CronJobs healthy and reliable</p>
+  
+  <CardGroup cols={2}>
+    <Card title="Dead-Man's Switch" icon="bell" href="/concepts/dead-man-switch">
+      Automatically detect when CronJobs don't run within expected windows. Get alerted before problems become incidents.
+    </Card>
+    <Card title="SLA Tracking" icon="chart-line" href="/concepts/sla-tracking">
+      Monitor success rates and duration percentiles (P50/P95/P99). Set thresholds and get alerts when SLAs are breached.
+    </Card>
+    <Card title="Intelligent Alerts" icon="lightbulb" href="/guides/configuring-alerts">
+      Rich alerts with pod logs, Kubernetes events, and AI-suggested fixes. Know exactly what went wrong and how to fix it.
+    </Card>
+    <Card title="Multiple Channels" icon="paper-plane" href="/concepts/alert-channels">
+      Send alerts to Slack, PagerDuty, webhooks, or email. Route critical vs warning alerts to different channels.
+    </Card>
+    <Card title="Built-in Dashboard" icon="gauge" href="/guides/dashboard">
+      Feature-rich web UI with charts, heatmaps, and execution history. Export data as CSV or JSON.
+    </Card>
+    <Card title="Prometheus Metrics" icon="chart-bar" href="/operations/prometheus-metrics">
+      Export metrics for existing monitoring infrastructure. Integrate with Grafana and AlertManager.
+    </Card>
+  </CardGroup>
+</div>
 
-## Make it yours
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold text-gray-900 dark:text-white mb-4">Explore by Topic</h2>
+  <p className="text-lg text-gray-600 dark:text-gray-400 mb-8">Deep dive into specific areas</p>
+  
+  <CardGroup cols={3}>
+    <Card title="Core Concepts" icon="book-open" href="/concepts/overview">
+      Understand monitors, alert channels, and how the operator works
+    </Card>
+    <Card title="Configuration Guides" icon="gear" href="/guides/monitoring-cronjobs">
+      Step-by-step guides for common monitoring scenarios
+    </Card>
+    <Card title="Operations" icon="server" href="/operations/architecture">
+      Architecture, storage options, and production best practices
+    </Card>
+    <Card title="API Reference" icon="code" href="/api/cronjobmonitor">
+      Complete CRD documentation and configuration options
+    </Card>
+    <Card title="Examples" icon="file-code" href="/examples/basic-monitor">
+      Ready-to-use YAML configurations for monitors and alerts
+    </Card>
+    <Card title="Troubleshooting" icon="wrench" href="/guides/troubleshooting">
+      Common issues and how to resolve them
+    </Card>
+  </CardGroup>
+</div>
 
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
-  </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
-  </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
-
-## Create beautiful pages
-
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="bg-gradient-to-br from-[#2563eb] to-[#1e40af] dark:from-[#1a1d27] dark:to-[#242838] rounded-2xl p-8 lg:p-12 border border-blue-500/20 dark:border-[#27272a]">
+    <div className="grid lg:grid-cols-2 gap-8 items-center">
+      <div>
+        <h2 className="text-3xl font-bold text-white mb-4">Ready to start monitoring?</h2>
+        <p className="text-lg text-blue-100 dark:text-gray-300 mb-6">
+          Install CronJob Guardian in your cluster and get visibility into your CronJobs in minutes. No vendor lock-in, runs entirely in your infrastructure.
+        </p>
+        <a 
+          href="/installation" 
+          className="inline-flex items-center px-6 py-3 rounded-lg bg-white text-[#2563eb] font-semibold hover:bg-blue-50 transition-colors shadow-lg"
+        >
+          View Installation Guide
+          <svg className="ml-2 w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+          </svg>
+        </a>
+      </div>
+      <div className="hidden lg:block">
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-white/10 dark:bg-[#0f1117] rounded-lg p-4 backdrop-blur-sm border border-white/10 dark:border-[#27272a]">
+            <div className="text-3xl font-bold text-white mb-1">99.9%</div>
+            <div className="text-sm text-blue-100 dark:text-gray-400">Success Rate</div>
+          </div>
+          <div className="bg-white/10 dark:bg-[#0f1117] rounded-lg p-4 backdrop-blur-sm border border-white/10 dark:border-[#27272a]">
+            <div className="text-3xl font-bold text-white mb-1">&lt;2s</div>
+            <div className="text-sm text-blue-100 dark:text-gray-400">Alert Latency</div>
+          </div>
+          <div className="bg-white/10 dark:bg-[#0f1117] rounded-lg p-4 backdrop-blur-sm border border-white/10 dark:border-[#27272a]">
+            <div className="text-3xl font-bold text-white mb-1">24/7</div>
+            <div className="text-sm text-blue-100 dark:text-gray-400">Monitoring</div>
+          </div>
+          <div className="bg-white/10 dark:bg-[#0f1117] rounded-lg p-4 backdrop-blur-sm border border-white/10 dark:border-[#27272a]">
+            <div className="text-3xl font-bold text-white mb-1">0</div>
+            <div className="text-sm text-blue-100 dark:text-gray-400">Vendor Lock-in</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

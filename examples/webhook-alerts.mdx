@@ -1,0 +1,637 @@
+---
+title: "Webhook Alert Integration"
+description: "Send CronJob alerts to custom HTTP endpoints and third-party services"
+---
+
+## Overview
+
+Webhook alerts allow you to integrate CronJob Guardian with any system that accepts HTTP requests. This enables:
+
+- Custom internal monitoring systems
+- Third-party incident management platforms
+- ITSM tools (ServiceNow, Jira Service Management)
+- Custom automation and remediation workflows
+- Data warehouses for alert analytics
+
+## Quick Start
+
+<Steps>
+  <Step title="Prepare your webhook endpoint">
+    Ensure your endpoint:
+    - Accepts POST requests (or configure a different method)
+    - Returns 2xx status code on success
+    - Can handle JSON payloads
+    - Is accessible from your Kubernetes cluster
+  </Step>
+
+  <Step title="Create a Kubernetes Secret with the URL">
+    ```bash
+    kubectl create secret generic webhook-url \
+      --namespace cronjob-guardian \
+      --from-literal=url=https://your-system.example.com/api/alerts
+    ```
+
+    If your endpoint requires authentication, add it to the secret:
+
+    ```bash
+    kubectl create secret generic webhook-url \
+      --namespace cronjob-guardian \
+      --from-literal=url=https://your-system.example.com/api/alerts \
+      --from-literal=token=your-api-token
+    ```
+  </Step>
+
+  <Step title="Create a Webhook AlertChannel">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: custom-webhook
+    spec:
+      type: webhook
+      webhook:
+        urlSecretRef:
+          name: webhook-url
+          namespace: cronjob-guardian
+          key: url
+        method: POST
+        headers:
+          Content-Type: application/json
+    EOF
+    ```
+  </Step>
+
+  <Step title="Reference in CronJobMonitor">
+    ```yaml
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: CronJobMonitor
+    metadata:
+      name: monitored-jobs
+      namespace: production
+    spec:
+      selector:
+        matchLabels:
+          tier: critical
+      alerting:
+        channelRefs:
+          - name: custom-webhook
+    ```
+  </Step>
+</Steps>
+
+## Basic Webhook AlertChannel
+
+Here's the example from the repository:
+
+```yaml alertchannels/webhook.yaml
+# Generic Webhook AlertChannel
+# Sends alerts to a custom HTTP endpoint
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: custom-webhook
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-url
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      X-Custom-Header: guardian
+```
+
+### Configuration Options
+
+<ResponseField name="webhook.urlSecretRef" type="object" required>
+  Reference to a Kubernetes Secret containing the webhook URL
+  
+  <Expandable title="properties">
+    <ResponseField name="name" type="string" required>
+      Name of the Secret
+    </ResponseField>
+    <ResponseField name="namespace" type="string" required>
+      Namespace where the Secret exists
+    </ResponseField>
+    <ResponseField name="key" type="string" required>
+      Key within the Secret (usually `url`)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="webhook.method" type="string">
+  HTTP method: `POST`, `PUT`, `PATCH` (default: `POST`)
+</ResponseField>
+
+<ResponseField name="webhook.headers" type="object">
+  Custom HTTP headers to include in requests
+  
+  Common headers:
+  - `Content-Type: application/json`
+  - `Authorization: Bearer <token>` (use secrets for tokens)
+  - Custom headers for your service
+</ResponseField>
+
+## Webhook with Authentication
+
+Most webhook endpoints require authentication. Here are common patterns:
+
+<CodeGroup>
+```yaml Bearer Token
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: webhook-auth-bearer
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-credentials
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Bearer {\{.Secret.token}\}  # References secret key
+```
+
+```yaml API Key Header
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: webhook-auth-apikey
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-credentials
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      X-API-Key: {\{.Secret.api_key}\}
+```
+
+```yaml Basic Auth
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: webhook-auth-basic
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-credentials
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Basic {\{.Secret.basic_auth}\}  # base64 encoded user:pass
+```
+</CodeGroup>
+
+### Creating Secrets with Authentication
+
+```bash
+# Bearer token
+kubectl create secret generic webhook-credentials \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://api.example.com/alerts \
+  --from-literal=token=your-bearer-token
+
+# API key
+kubectl create secret generic webhook-credentials \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://api.example.com/alerts \
+  --from-literal=api_key=your-api-key
+
+# Basic auth (base64 encode "username:password")
+kubectl create secret generic webhook-credentials \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://api.example.com/alerts \
+  --from-literal=basic_auth=$(echo -n "user:pass" | base64)
+```
+
+## Webhook Payload Format
+
+CronJob Guardian sends alerts as JSON payloads:
+
+```json
+{
+  "alertType": "jobFailed",
+  "severity": "critical",
+  "timestamp": "2026-03-04T08:15:23Z",
+  "cronJob": {
+    "name": "daily-backup",
+    "namespace": "production",
+    "uid": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  },
+  "job": {
+    "name": "daily-backup-28501234",
+    "namespace": "production",
+    "startTime": "2026-03-04T08:10:00Z",
+    "completionTime": "2026-03-04T08:15:23Z",
+    "duration": "5m23s",
+    "status": "Failed",
+    "exitCode": 1
+  },
+  "context": {
+    "logs": "Error: Failed to connect to database\nConnection timeout after 30s\n...",
+    "events": [
+      {
+        "type": "Warning",
+        "reason": "BackoffLimitExceeded",
+        "message": "Job has reached the specified backoff limit"
+      }
+    ],
+    "podStatus": {
+      "phase": "Failed",
+      "containerStatuses": [
+        {
+          "name": "backup",
+          "state": "terminated",
+          "exitCode": 1,
+          "reason": "Error"
+        }
+      ]
+    },
+    "suggestedFix": "Database connection failed. Check: 1. Database pod is running..."
+  },
+  "monitor": {
+    "name": "database-backups",
+    "namespace": "databases"
+  },
+  "dashboardURL": "https://guardian.example.com/jobs/production/daily-backup"
+}
+```
+
+### Alert Types
+
+The `alertType` field can be:
+
+- `jobFailed`: Job execution failed
+- `deadManTriggered`: No successful run within expected time
+- `slaBreached`: Success rate fell below threshold
+- `missedSchedule`: Job didn't start on schedule
+- `durationRegression`: Job duration increased significantly
+- `suspendedTooLong`: Job suspended for extended period
+
+## Integration Examples
+
+### ServiceNow Integration
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: servicenow
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: servicenow-credentials
+      namespace: cronjob-guardian
+      key: url  # https://instance.service-now.com/api/now/table/incident
+    method: POST
+    headers:
+      Content-Type: application/json
+      Authorization: Basic {\{.Secret.auth}\}
+```
+
+Create the secret:
+
+```bash
+kubectl create secret generic servicenow-credentials \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://yourinstance.service-now.com/api/now/table/incident \
+  --from-literal=auth=$(echo -n "admin:password" | base64)
+```
+
+### Microsoft Teams Integration
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: teams
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: teams-webhook
+      namespace: cronjob-guardian
+      key: url  # https://outlook.office.com/webhook/...
+    method: POST
+    headers:
+      Content-Type: application/json
+```
+
+Create the secret:
+
+```bash
+kubectl create secret generic teams-webhook \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://outlook.office.com/webhook/your-webhook-url
+```
+
+### Datadog Events API
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: datadog
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: datadog-credentials
+      namespace: cronjob-guardian
+      key: url  # https://api.datadoghq.com/api/v1/events
+    method: POST
+    headers:
+      Content-Type: application/json
+      DD-API-KEY: {\{.Secret.api_key}\}
+```
+
+Create the secret:
+
+```bash
+kubectl create secret generic datadog-credentials \
+  --namespace cronjob-guardian \
+  --from-literal=url=https://api.datadoghq.com/api/v1/events \
+  --from-literal=api_key=your-datadog-api-key
+```
+
+## Custom Headers for Routing
+
+Use custom headers to route alerts within your system:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: custom-routing
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-url
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      X-Alert-Source: cronjob-guardian
+      X-Environment: production
+      X-Team: platform
+      X-Severity: "{\{.Alert.Severity}\}"  # Dynamic from alert
+```
+
+Your endpoint can route based on these headers:
+
+- `X-Team: platform` → Routes to platform team
+- `X-Severity: critical` → Escalates appropriately
+- `X-Environment: production` → Different handling than dev
+
+## Testing Webhook Integration
+
+<Steps>
+  <Step title="Set up a test endpoint">
+    Use a service like [webhook.site](https://webhook.site/) or [requestbin.com](https://requestbin.com/) to inspect payloads:
+
+    ```bash
+    # Get a temporary webhook URL from webhook.site
+    # Then create the secret
+    kubectl create secret generic webhook-test \
+      --namespace cronjob-guardian \
+      --from-literal=url=https://webhook.site/your-unique-id
+    ```
+  </Step>
+
+  <Step title="Create test AlertChannel">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: AlertChannel
+    metadata:
+      name: webhook-test
+    spec:
+      type: webhook
+      webhook:
+        urlSecretRef:
+          name: webhook-test
+          namespace: cronjob-guardian
+          key: url
+        method: POST
+        headers:
+          Content-Type: application/json
+    EOF
+    ```
+  </Step>
+
+  <Step title="Create a failing test job">
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: batch/v1
+    kind: CronJob
+    metadata:
+      name: test-webhook
+      namespace: default
+      labels:
+        test: webhook
+    spec:
+      schedule: "*/5 * * * *"
+      jobTemplate:
+        spec:
+          template:
+            spec:
+              containers:
+                - name: test
+                  image: busybox
+                  command: ["sh", "-c", "echo 'Testing webhook' && exit 1"]
+              restartPolicy: Never
+    EOF
+    ```
+
+    And a monitor:
+
+    ```bash
+    kubectl apply -f - <<EOF
+    apiVersion: guardian.illenium.net/v1alpha1
+    kind: CronJobMonitor
+    metadata:
+      name: test-monitor
+      namespace: default
+    spec:
+      selector:
+        matchLabels:
+          test: webhook
+      alerting:
+        channelRefs:
+          - name: webhook-test
+    EOF
+    ```
+  </Step>
+
+  <Step title="Wait and inspect payload">
+    After the job fails, check webhook.site to see the JSON payload sent by CronJob Guardian.
+
+    Verify:
+    - Headers are correct
+    - Payload contains expected fields
+    - Authentication works (if configured)
+  </Step>
+
+  <Step title="Clean up">
+    ```bash
+    kubectl delete cronjob test-webhook -n default
+    kubectl delete cronjobmonitor test-monitor -n default
+    kubectl delete alertchannel webhook-test
+    kubectl delete secret webhook-test -n cronjob-guardian
+    ```
+  </Step>
+</Steps>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Webhook endpoint returns 4xx or 5xx">
+    **Check endpoint is accessible:**
+    ```bash
+    kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+      curl -X POST https://your-endpoint.com/api/alerts \
+      -H "Content-Type: application/json" \
+      -d '{"test": true}'
+    ```
+
+    **Check authentication:**
+    - Verify token/credentials in secret are correct
+    - Ensure header format matches endpoint expectations
+    - Check if credentials have expired
+
+    **Check controller logs:**
+    ```bash
+    kubectl logs -n cronjob-guardian deployment/cronjob-guardian-controller-manager | grep -i webhook
+    ```
+  </Accordion>
+
+  <Accordion title="Endpoint not receiving requests">
+    **Verify AlertChannel status:**
+    ```bash
+    kubectl describe alertchannel custom-webhook
+    ```
+
+    **Check network connectivity:**
+    ```bash
+    # Test from within the cluster
+    kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- \
+      curl -v https://your-endpoint.com
+    ```
+
+    **Check for NetworkPolicies:**
+    ```bash
+    kubectl get networkpolicy -n cronjob-guardian
+    ```
+  </Accordion>
+
+  <Accordion title="Wrong payload format">
+    CronJob Guardian sends a standard JSON format. If your endpoint expects a different format:
+
+    1. Use a proxy/adapter service to transform the payload
+    2. Configure your endpoint to accept Guardian's format
+    3. Use custom headers to provide routing/metadata
+
+    Example adapter pattern:
+    - Guardian → Your Adapter Service → Third-party API
+    - Adapter transforms payload to match third-party expectations
+  </Accordion>
+
+  <Accordion title="SSL/TLS certificate errors">
+    If your endpoint uses self-signed certificates:
+
+    ```bash
+    # Check certificate
+    openssl s_client -connect your-endpoint.com:443 -showcerts
+    ```
+
+    Options:
+    1. Use a proper CA-signed certificate
+    2. Configure CronJob Guardian to trust your CA (requires controller configuration)
+    3. Use HTTP instead (not recommended for production)
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Secrets for URLs" icon="lock">
+    Always store webhook URLs in secrets, especially if they contain tokens or sensitive paths.
+  </Card>
+  
+  <Card title="Implement Retry Logic" icon="rotate">
+    Your endpoint should be idempotent. Guardian may retry failed webhook calls.
+  </Card>
+  
+  <Card title="Return 2xx Quickly" icon="gauge">
+    Respond with 200 OK quickly. Process alerts asynchronously if needed.
+  </Card>
+  
+  <Card title="Validate Payloads" icon="check">
+    Verify payloads are from Guardian using custom headers or signature validation.
+  </Card>
+  
+  <Card title="Log All Requests" icon="file-lines">
+    Log incoming webhook requests for debugging and audit trails.
+  </Card>
+  
+  <Card title="Monitor Endpoint Health" icon="heartbeat">
+    Alert if your webhook endpoint is down to avoid missing critical alerts.
+  </Card>
+</CardGroup>
+
+## Advanced: Webhook Signature Validation
+
+For production, validate that webhooks are from CronJob Guardian:
+
+```yaml
+apiVersion: guardian.illenium.net/v1alpha1
+kind: AlertChannel
+metadata:
+  name: secure-webhook
+spec:
+  type: webhook
+  webhook:
+    urlSecretRef:
+      name: webhook-credentials
+      namespace: cronjob-guardian
+      key: url
+    method: POST
+    headers:
+      Content-Type: application/json
+      X-Guardian-Secret: {\{.Secret.signing_key}\}
+```
+
+Your endpoint validates the `X-Guardian-Secret` header matches the expected value.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Email Alerts" icon="envelope" href="/examples/email-alerts">
+    Configure SMTP email notifications
+  </Card>
+  <Card title="Slack Alerts" icon="slack" href="/examples/slack-alerts">
+    Set up Slack integration
+  </Card>
+  <Card title="PagerDuty Alerts" icon="bullhorn" href="/examples/pagerduty-alerts">
+    Configure on-call escalation
+  </Card>
+  <Card title="Alert Channels Reference" icon="book" href="/api/alertchannel">
+    Complete API documentation
+  </Card>
+</CardGroup>
