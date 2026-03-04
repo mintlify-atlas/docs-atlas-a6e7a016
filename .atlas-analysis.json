@@ -1,0 +1,118 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "CronJob Guardian",
+  "projectDescription": "Kubernetes operator for CronJob monitoring with SLA tracking, dead-man's switch detection, and intelligent alerting",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/overview",
+              "concepts/cronjob-monitor",
+              "concepts/alert-channels",
+              "concepts/dead-man-switch",
+              "concepts/sla-tracking"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/monitoring-cronjobs",
+              "guides/configuring-alerts",
+              "guides/sla-configuration",
+              "guides/maintenance-windows",
+              "guides/dashboard",
+              "guides/troubleshooting"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/architecture",
+              "operations/configuration",
+              "operations/storage",
+              "operations/prometheus-metrics",
+              "operations/security",
+              "operations/upgrading"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Custom Resources",
+            "pages": [
+              "api/cronjobmonitor",
+              "api/alertchannel"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "api/operator-config",
+              "api/helm-values"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Examples",
+        "groups": [
+          {
+            "group": "Monitors",
+            "pages": [
+              "examples/basic-monitor",
+              "examples/namespace-monitor",
+              "examples/cluster-monitor",
+              "examples/advanced-monitor"
+            ]
+          },
+          {
+            "group": "Alert Channels",
+            "pages": [
+              "examples/slack-alerts",
+              "examples/pagerduty-alerts",
+              "examples/webhook-alerts",
+              "examples/email-alerts"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Dead-man's switch detection for missed CronJob schedules",
+    "SLA tracking with success rates and duration percentiles (P50/P95/P99)",
+    "Intelligent alerting with pod logs, events, and suggested fixes",
+    "Multiple alert channels (Slack, PagerDuty, webhook, email)",
+    "Built-in web dashboard with charts and heatmaps",
+    "Prometheus metrics export",
+    "Maintenance window support",
+    "Performance regression detection"
+  ],
+  "publicApiSurface": [
+    "CronJobMonitor CRD (guardian.illenium.net/v1alpha1)",
+    "AlertChannel CRD (guardian.illenium.net/v1alpha1)",
+    "REST API endpoints (/api/monitors, /api/cronjobs, /api/executions)",
+    "Prometheus metrics endpoint (/metrics)",
+    "Web dashboard UI (port 8080)",
+    "Helm chart (oci://ghcr.io/illeniumstudios/charts/cronjob-guardian)"
+  ]
+}
